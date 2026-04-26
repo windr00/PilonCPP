@@ -287,9 +287,15 @@ void GenomeRegion::postProcess() {
             if (homo && b == r && bc.highConfidence() && !bc.indel) {
                 confirmed[i] = true;
             } else if (bc.isInsertion() && bc.homoIndel) {
-                changes_.push_back({i, INS, pu});
+                // Compact Change: pre-compute BaseCall data, no PileUp copy
+                changes_.push_back({i, INS, b, homo, bc.score,
+                                    static_cast<char>(0), bc.insertion, bc.deletion,
+                                    bc.homoIndel, bc.indel});
             } else if (bc.isDeletion() && bc.homoIndel) {
-                changes_.push_back({i, DEL, pu});
+                // Compact Change: pre-compute BaseCall data, no PileUp copy
+                changes_.push_back({i, DEL, b, homo, bc.score,
+                                    static_cast<char>(0), bc.insertion, bc.deletion,
+                                    bc.homoIndel, bc.indel});
                 // Scala: mark deleted positions for downstream positions
                 for (int j = 1; j < static_cast<int>(bc.deletion.length()); j++) {
                     int delIdx = i + j;
@@ -300,9 +306,15 @@ void GenomeRegion::postProcess() {
                 }
             } else if (b != r && bc.score > 0) {
                 if (homo) {
-                    changes_.push_back({i, SNP, pu});
+                    // SNP Change
+                    changes_.push_back({i, SNP, b, homo, bc.score,
+                                        bc.altBase, std::string(), std::string(),
+                                        bc.homoIndel, bc.indel});
                 } else if (fixamb || bc.altBase != r) {
-                    changes_.push_back({i, AMB, pu});
+                    // AMB Change
+                    changes_.push_back({i, AMB, b, homo, bc.score,
+                                        bc.altBase, std::string(), std::string(),
+                                        bc.homoIndel, bc.indel});
                 }
             }
         }
@@ -371,12 +383,10 @@ void GenomeRegion::identifyAndFixIssues() {
     for (const auto& change : changes_) {
         int i = change.index;
         ChangeKind kind = change.kind;
-        const PileUp& pu = change.pu;
         
         int loc = locus(i);
         char rBase = contigBases[i];
-        auto bc = pu.baseCall();
-        char cBase = bc.base;
+        char cBase = change.base;
         
         if (!excluded[i]) {
             switch (kind) {
@@ -388,8 +398,20 @@ void GenomeRegion::identifyAndFixIssues() {
                 case AMB:
                     if (Pilon::fixSnps && !Pilon::longread) {
                         if (Pilon::iupac) {
-                            smallFixList.push_back({loc, std::string(1, rBase),
-                                                    std::string(1, bc.iupacBase())});
+                            // Compute IUPAC base for ambiguous calls
+                            char iupacB = (rBase == 'A' && cBase == 'C') ? 'M' :
+                                          (rBase == 'A' && cBase == 'G') ? 'R' :
+                                          (rBase == 'A' && cBase == 'T') ? 'W' :
+                                          (rBase == 'C' && cBase == 'A') ? 'M' :
+                                          (rBase == 'C' && cBase == 'G') ? 'S' :
+                                          (rBase == 'C' && cBase == 'T') ? 'Y' :
+                                          (rBase == 'G' && cBase == 'A') ? 'R' :
+                                          (rBase == 'G' && cBase == 'C') ? 'S' :
+                                          (rBase == 'G' && cBase == 'T') ? 'K' :
+                                          (rBase == 'T' && cBase == 'A') ? 'W' :
+                                          (rBase == 'T' && cBase == 'C') ? 'Y' :
+                                          (rBase == 'T' && cBase == 'G') ? 'K' : 'N';
+                            smallFixList.push_back({loc, std::string(1, rBase), std::string(1, iupacB)});
                         } else {
                             snpFixList.push_back({loc, std::string(1, rBase), std::string(1, cBase)});
                         }
@@ -397,12 +419,12 @@ void GenomeRegion::identifyAndFixIssues() {
                     break;
                 case INS:
                     if (Pilon::fixIndels) {
-                        smallFixList.push_back({loc, "", bc.insertion});
+                        smallFixList.push_back({loc, "", change.insertion});
                     }
                     break;
                 case DEL:
                     if (Pilon::fixIndels) {
-                        smallFixList.push_back({loc, bc.deletion, ""});
+                        smallFixList.push_back({loc, change.deletion, ""});
                     }
                     break;
             }
@@ -637,6 +659,11 @@ void GenomeFile::processRegions(std::vector<BamFile*>& bamFiles) {
 
                 processedRegions_.push_back(std::move(region));
 
+                // Free per-chunk memory unless VCF output is needed
+                if (!Pilon::vcf) {
+                    processedRegions_.back().freeMemory();
+                }
+
                 if (Pilon::verbose) {
                     std::cout << "  Chunk " << chunkStart << "-" << chunkStop << " done" << std::endl;
                 }
@@ -695,6 +722,14 @@ void GenomeFile::processRegions(std::vector<BamFile*>& bamFiles) {
                   if (a.name != b.name) return a.name < b.name;
                   return a.start < b.start;
               });
+    
+    // Free per-chunk memory unless VCF output is needed
+    if (!Pilon::vcf) {
+        for (auto& reg : processedRegions_) {
+            reg.freeMemory();
+        }
+    }
+    
     std::cout << "Multi-threaded processing complete: " << totalChunks << " chunks" << std::endl;
 }
 

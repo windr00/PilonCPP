@@ -75,11 +75,20 @@ struct GenomeRegion {
     long long baseCount;
 
     // Change tracking (matching Scala changeMap)
+    // Stores pre-computed BaseCall data instead of copying entire PileUp
     enum ChangeKind { SNP, INS, DEL, AMB };
     struct Change {
         int index;
         ChangeKind kind;
-        PileUp pu;
+        // Pre-computed from BaseCall, avoids copying ~180-byte PileUp
+        char base;
+        bool homo;
+        int score;
+        char altBase;
+        std::string insertion;
+        std::string deletion;
+        bool homoIndel;
+        bool indel;
     };
     std::vector<Change> changes_;
 
@@ -134,6 +143,25 @@ struct GenomeRegion {
     // Write methods
     void writeVcf(FILE* writer) const;
     void writeChanges(FILE* writer, const std::string& newName, int& offset) const;
+    
+    // Free per-chunk memory after processing (pileups are not needed downstream)
+    void freeMemory() {
+        pileUps.clear();
+        pileUps.shrink_to_fit();
+        confirmed.clear();
+        ambiguous.clear();
+        changed.clear();
+        deleted.clear();
+        excluded.clear();
+        coverage_arr.clear();
+        badCoverage_arr.clear();
+        clips_arr.clear();
+        insertSize_arr.clear();
+        physCoverage_arr.clear();
+        fragCoverage_arr.clear();
+        weightedQual_arr.clear();
+        weightedMq_arr.clear();
+    }
 };
 
 // FASTA genome file reader
@@ -150,6 +178,7 @@ public:
     void processRegions(std::vector<BamFile*>& bamFiles);
 
     // Get processed regions for VCF output
+    std::vector<GenomeRegion>& getProcessedRegions() { return processedRegions_; }
     const std::vector<GenomeRegion>& getProcessedRegions() const { return processedRegions_; }
 
 private:

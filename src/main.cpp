@@ -118,6 +118,13 @@ int main(int argc, char* argv[]) {
         
         vcf.close();
         std::cout << "  Written " << totalVariants << " variant records" << std::endl;
+        
+        // Free pileup memory after VCF is done (saves ~90% memory per chunk)
+        for (auto& region : genome.getProcessedRegions()) {
+            region.freeMemory();
+        }
+    } else {
+        // Free memory already done in processRegions
     }
 
     // Output polished genome
@@ -131,7 +138,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Write fixed sequences (matching Scala: reg._2 map { _.bases })
-    const auto& regions = genome.getProcessedRegions();
+    auto& regions = genome.getProcessedRegions();
     std::string currentName;
     std::string currentSeq;
     
