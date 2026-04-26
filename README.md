@@ -62,7 +62,7 @@ sudo yum install gcc-c++ cmake htslib-devel bzip2-devel
 ```bash
 cd piloncpp
 mkdir build && cd build
-cmake ..
+cmake -DCMAKE_BUILD_TYPE=Release ..
 make -j$(nproc)
 ```
 
