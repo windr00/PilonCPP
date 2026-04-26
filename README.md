@@ -106,6 +106,8 @@ make -j$(nproc)
 
 ## 📊 与原版 Pilon 功能对比
 
+![PilonCpp Architecture](docs/piloncpp-architecture.png)
+
 下表展示了 PilonCpp 与 Broad Institute 原版 Pilon (Scala) 的模块级功能对齐状态。
 
 ### 核心算法

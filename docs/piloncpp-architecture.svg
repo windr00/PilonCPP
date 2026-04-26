@@ -1,0 +1,209 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 620" 
+     width="1000" height="620">
+  <style>
+    text { font-family: 'Helvetica Neue', Helvetica, Arial, 'PingFang SC', 'Microsoft YaHei', sans-serif; }
+  </style>
+  <defs>
+    <!-- Arrow markers -->
+    <marker id="arrow-blue" markerWidth="10" markerHeight="7"
+            refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#2563eb"/>
+    </marker>
+    <marker id="arrow-green" markerWidth="10" markerHeight="7"
+            refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#16a34a"/>
+    </marker>
+    <marker id="arrow-purple" markerWidth="10" markerHeight="7"
+            refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#9333ea"/>
+    </marker>
+    <marker id="arrow-gray" markerWidth="10" markerHeight="7"
+            refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#6b7280"/>
+    </marker>
+    <!-- Subtle shadow filter -->
+    <filter id="shadow" x="-5%" y="-5%" width="110%" height="110%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-opacity="0.08"/>
+    </filter>
+  </defs>
+
+  <!-- White background -->
+  <rect width="1000" height="620" fill="#ffffff"/>
+
+  <!-- Title -->
+  <text x="500" y="32" text-anchor="middle" fill="#111827" font-size="20" font-weight="600">
+    PilonCpp Architecture
+  </text>
+
+  <!-- ============================== -->
+  <!-- LAYER 1: INPUT (Left Column)  -->
+  <!-- ============================== -->
+
+  <!-- Input Layer Container -->
+  <rect x="25" y="55" width="250" height="530" rx="10" ry="10" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1.5"/>
+  <text x="150" y="80" text-anchor="middle" fill="#6b7280" font-size="12" font-weight="600">
+    INPUT LAYER
+  </text>
+
+  <!-- FASTA Node -->
+  <rect x="50" y="100" width="200" height="70" rx="8" ry="8" fill="#eff6ff" stroke="#bfdbfe" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="75" y="125" fill="#3b82f6" font-size="18">📄</text>
+  <text x="150" y="130" text-anchor="middle" fill="#111827" font-size="14" font-weight="600">Reference Genome</text>
+  <text x="150" y="152" text-anchor="middle" fill="#6b7280" font-size="12">FASTA format</text>
+
+  <!-- BAM Node -->
+  <rect x="50" y="200" width="200" height="70" rx="8" ry="8" fill="#eff6ff" stroke="#bfdbfe" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="75" y="225" fill="#3b82f6" font-size="18">🗂️</text>
+  <text x="150" y="230" text-anchor="middle" fill="#111827" font-size="14" font-weight="600">BAM Files</text>
+  <text x="150" y="252" text-anchor="middle" fill="#6b7280" font-size="12">Short / long reads</text>
+
+  <!-- Config Node -->
+  <rect x="50" y="300" width="200" height="70" rx="8" ry="8" fill="#f0fdf4" stroke="#bbf7d0" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="75" y="325" fill="#22c55e" font-size="18">⚙️</text>
+  <text x="150" y="330" text-anchor="middle" fill="#111827" font-size="14" font-weight="600">Pilon Parameters</text>
+  <text x="150" y="352" text-anchor="middle" fill="#6b7280" font-size="12">--min-depth, --fix, etc.</text>
+
+  <!-- Threading Node -->
+  <rect x="50" y="400" width="200" height="70" rx="8" ry="8" fill="#fef2f2" stroke="#fecaca" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="75" y="425" fill="#ef4444" font-size="18">🧵</text>
+  <text x="150" y="430" text-anchor="middle" fill="#111827" font-size="14" font-weight="600">Multi-threading</text>
+  <text x="150" y="452" text-anchor="middle" fill="#6b7280" font-size="12">--threads N</text>
+
+  <!-- htslib Note -->
+  <rect x="50" y="500" width="200" height="55" rx="6" ry="6" fill="#faf5ff" stroke="#ede9fe" stroke-width="1.5"/>
+  <text x="150" y="520" text-anchor="middle" fill="#7c3aed" font-size="12" font-weight="600">Powered by htslib</text>
+  <text x="150" y="540" text-anchor="middle" fill="#6b7280" font-size="11">C BAM/FASTA library</text>
+
+  <!-- ============================== -->
+  <!-- LAYER 2: CORE (Center Column) -->
+  <!-- ============================== -->
+
+  <!-- Core Container -->
+  <rect x="295" y="55" width="420" height="530" rx="10" ry="10" fill="#fffbeb" stroke="#fde68a" stroke-width="1.5" stroke-dasharray="6,3"/>
+  <rect x="295" y="55" width="420" height="25" rx="10" ry="10" fill="#fffbeb" stroke="#fde68a" stroke-width="1.5"/>
+  <text x="505" y="72" text-anchor="middle" fill="#d97706" font-size="12" font-weight="600">
+    CORE PROCESSING PIPELINE
+  </text>
+
+  <!-- BamFile Reader -->
+  <rect x="335" y="95" width="340" height="65" rx="8" ry="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5" filter="url(#shadow)"/>
+  <!-- Icon accent -->
+  <rect x="335" y="95" width="8" height="65" rx="4" ry="4" fill="#3b82f6"/>
+  <text x="360" y="118" fill="#111827" font-size="14" font-weight="600">BamFile Reader</text>
+  <text x="360" y="138" fill="#6b7280" font-size="11">CIGAR parsing · Read validation · adjMq/qual adjustment</text>
+  <text x="360" y="152" fill="#6b7280" font-size="11">Insertion reposition · Deletion slide · Soft clip tracking</text>
+
+  <!-- Arrow: BamFile → PileUp -->
+  <line x1="505" y1="160" x2="505" y2="178" stroke="#2563eb" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
+
+  <!-- PileUp Region -->
+  <rect x="335" y="180" width="340" height="65" rx="8" ry="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5" filter="url(#shadow)"/>
+  <rect x="335" y="180" width="8" height="65" rx="4" ry="4" fill="#16a34a"/>
+  <text x="360" y="203" fill="#111827" font-size="14" font-weight="600">PileUp Accumulation</text>
+  <text x="360" y="223" fill="#6b7280" font-size="11">Base counting · Quality summing · physCov tracking</text>
+  <text x="360" y="237" fill="#6b7280" font-size="11">Insertion/deletion records · Bad pair tracking</text>
+
+  <!-- Arrow: PileUp → BaseCall -->
+  <line x1="505" y1="245" x2="505" y2="263" stroke="#2563eb" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
+
+  <!-- BaseCall -->
+  <rect x="335" y="265" width="340" height="65" rx="8" ry="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5" filter="url(#shadow)"/>
+  <rect x="335" y="265" width="8" height="65" rx="4" ry="4" fill="#9333ea"/>
+  <text x="360" y="288" fill="#111827" font-size="14" font-weight="600">BaseCall Analysis</text>
+  <text x="360" y="308" fill="#6b7280" font-size="11">Homozygous/heterozygous scoring · Indel detection</text>
+  <text x="360" y="322" fill="#6b7280" font-size="11">High/low confidence · IUPAC ambiguity</text>
+
+  <!-- Arrow: BaseCall → postProcess -->
+  <line x1="505" y1="330" x2="505" y2="348" stroke="#2563eb" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
+
+  <!-- postProcess -->
+  <rect x="335" y="350" width="340" height="65" rx="8" ry="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5" filter="url(#shadow)"/>
+  <rect x="335" y="350" width="8" height="65" rx="4" ry="4" fill="#dc2626"/>
+  <text x="360" y="373" fill="#111827" font-size="14" font-weight="600">postProcess · Change Detection</text>
+  <text x="360" y="393" fill="#6b7280" font-size="11">MinDepth filtering · SNP/INS/DEL/AMB classification</text>
+  <text x="360" y="407" fill="#6b7280" font-size="11">deleted[] / excluded[] marking · Coverage stats</text>
+
+  <!-- Arrow: postProcess → fixIssues -->
+  <line x1="505" y1="415" x2="505" y2="433" stroke="#2563eb" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
+
+  <!-- Fix Engine -->
+  <rect x="335" y="435" width="340" height="65" rx="8" ry="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5" filter="url(#shadow)"/>
+  <rect x="335" y="435" width="8" height="65" rx="4" ry="4" fill="#d97706"/>
+  <text x="360" y="458" fill="#111827" font-size="14" font-weight="600">identifyAndFixIssues · Fix Engine</text>
+  <text x="360" y="478" fill="#6b7280" font-size="11">fixFixList (dedup) → Apply fixes (reverse order)</text>
+  <text x="360" y="492" fill="#6b7280" font-size="11">SNP first · Indel/gap second · Bases modification</text>
+
+  <!-- ============================== -->
+  <!-- LAYER 3: OUTPUT (Right Column) -->
+  <!-- ============================== -->
+
+  <!-- Output Container -->
+  <rect x="735" y="55" width="240" height="530" rx="10" ry="10" fill="#f0fdfa" stroke="#99f6e4" stroke-width="1.5"/>
+  <text x="855" y="80" text-anchor="middle" fill="#0d9488" font-size="12" font-weight="600">
+    OUTPUT LAYER
+  </text>
+
+  <!-- Polished FASTA -->
+  <rect x="755" y="100" width="200" height="70" rx="8" ry="8" fill="#f0fdf4" stroke="#bbf7d0" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="780" y="125" fill="#22c55e" font-size="18">🧬</text>
+  <text x="855" y="130" text-anchor="middle" fill="#111827" font-size="14" font-weight="600">Polished FASTA</text>
+  <text x="855" y="152" text-anchor="middle" fill="#6b7280" font-size="12">name_pilon.fasta</text>
+
+  <!-- VCF Output -->
+  <rect x="755" y="200" width="200" height="70" rx="8" ry="8" fill="#fef2f2" stroke="#fecaca" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="780" y="225" fill="#ef4444" font-size="18">📊</text>
+  <text x="855" y="230" text-anchor="middle" fill="#111827" font-size="14" font-weight="600">VCF Report</text>
+  <text x="855" y="252" text-anchor="middle" fill="#6b7280" font-size="12">variants.vcf</text>
+
+  <!-- Changes -->
+  <rect x="755" y="300" width="200" height="70" rx="8" ry="8" fill="#f8fafc" stroke="#d1d5db" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="780" y="325" fill="#6b7280" font-size="18">📝</text>
+  <text x="855" y="330" text-anchor="middle" fill="#111827" font-size="14" font-weight="600">Changes Report</text>
+  <text x="855" y="352" text-anchor="middle" fill="#6b7280" font-size="12">--changes output</text>
+
+  <!-- FreeMemory note -->
+  <rect x="755" y="460" width="200" height="55" rx="6" ry="6" fill="#fefce8" stroke="#fde047" stroke-width="1.5"/>
+  <text x="855" y="480" text-anchor="middle" fill="#ca8a04" font-size="12" font-weight="600">💡 Memory Optimized</text>
+  <text x="855" y="500" text-anchor="middle" fill="#6b7280" font-size="11">PileUps freed post-process</text>
+
+  <!-- ============================== -->
+  <!-- ARROWS between layers         -->
+  <!-- ============================== -->
+
+  <!-- FASTA → BamFile -->
+  <path d="M 250 135 L 290 135 L 310 127 L 335 127"
+        stroke="#2563eb" stroke-width="1.5" fill="none" marker-end="url(#arrow-blue)"/>
+
+  <!-- BAM → BamFile -->
+  <path d="M 250 235 L 280 235 L 310 150 L 335 150"
+        stroke="#2563eb" stroke-width="1.5" fill="none" marker-end="url(#arrow-blue)"/>
+
+  <!-- Fix Engine → Polished FASTA -->
+  <path d="M 675 467 L 710 467 L 730 135 L 755 135"
+        stroke="#16a34a" stroke-width="1.5" fill="none" marker-end="url(#arrow-green)"/>
+
+  <!-- Fix Engine → VCF -->
+  <path d="M 675 467 L 720 467 L 735 235 L 755 235"
+        stroke="#9333ea" stroke-width="1.5" fill="none" marker-end="url(#arrow-purple)"/>
+
+  <!-- Config → postProcess -->
+  <path d="M 250 335 L 285 335 L 320 382 L 335 382"
+        stroke="#6b7280" stroke-width="1.5" fill="none" marker-end="url(#arrow-gray)" stroke-dasharray="4,3"/>
+
+  <!-- Threading → Multi-chunk parallel -->
+  <path d="M 250 435 L 280 435 L 320 450 L 335 450"
+        stroke="#6b7280" stroke-width="1.5" fill="none" marker-end="url(#arrow-gray)" stroke-dasharray="4,3"/>
+
+  <!-- ============================== -->
+  <!-- LEGEND -->
+  <!-- ============================== -->
+  <g transform="translate(30, 570)">
+    <text x="0" y="-5" fill="#111827" font-size="12" font-weight="600">Legend</text>
+    <line x1="0" y1="8" x2="30" y2="8" stroke="#2563eb" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
+    <text x="36" y="12" fill="#6b7280" font-size="11">Data flow</text>
+    <line x1="110" y1="8" x2="140" y2="8" stroke="#16a34a" stroke-width="1.5" marker-end="url(#arrow-green)"/>
+    <text x="146" y="12" fill="#6b7280" font-size="11">Output flow</text>
+    <line x1="230" y1="8" x2="260" y2="8" stroke="#6b7280" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrow-gray)"/>
+    <text x="266" y="12" fill="#6b7280" font-size="11">Configuration</text>
+  </g>
+</svg>
