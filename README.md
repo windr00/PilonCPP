@@ -104,7 +104,87 @@ make -j$(nproc)
 | `--min-depth` | 最小覆盖深度 (默认: 10) |
 | `--min-qual` | 最小碱基质量 (默认: 13) |
 
-## 📊 性能对比
+## 📊 与原版 Pilon 功能对比
+
+下表展示了 PilonCpp 与 Broad Institute 原版 Pilon (Scala) 的模块级功能对齐状态。
+
+### 核心算法
+
+| 模块 | 对齐状态 | 说明 |
+|------|---------|------|
+| **PileUp add/remove** | ✅ 完全对齐 | 碱基计数、质量累积、比对质量积累 |
+| **PileUp addInsertion/addDeletion** | ✅ 完全对齐 | 插入/删除事件的积累逻辑 |
+| **PileUp depth/count** | ✅ 完全对齐 | 覆盖深度 = 碱基和 + 删除数 |
+| **BaseCall 评分** | ✅ 完全对齐 | homoScore (纯合评分)、heteroScore (杂合评分) |
+| **BaseCall indel** | ✅ 完全对齐 | 低/中/高阈值 indel 判定 |
+| **CIGAR M/EQ/X** | ✅ 完全对齐 | 匹配操作、trusted 区域过滤 |
+| **CIGAR I (Insertion)** | ✅ 完全对齐 | 同聚物左侧重定位 + 旋转插入序列 |
+| **CIGAR D (Deletion)** | ✅ 完全对齐 | 同聚物滑动 + 删除序列提取 |
+| **CIGAR S (Soft Clip)** | ✅ 完全对齐 | clipStart/clipEnd 统计 |
+| **CIGAR H/N** | ✅ 完全对齐 | Hard clip 忽略、Ref skip 跳过 |
+| **adjMq 计算** | ✅ 完全对齐 | `roundDiv(mq*(length-clippedBases), length)` |
+| **indelMq 计算** | ✅ 完全对齐 | 长读长时 `min(adjMq, 8)` |
+| **trusted 区域** | ✅ 完全对齐 | `offset >= flank && length - flank > offset` |
+| **valid 读判定** | ✅ 完全对齐 | `mq >= minMq && (!paired \|\| properPair && sameRef)` |
+| **physCov 追踪** | ✅ 完全对齐 | 差分累加 + 前缀和后处理 |
+| **postProcess** | ✅ 完全对齐 | 收集 SNP/INS/DEL/AMB changes |
+| **fixFixList** | ✅ 完全对齐 | 排序 + 重叠检测 + 保留较大 fix |
+| **fixIssues** | ✅ 完全对齐 | 从后往前应用 + 兼容性校验 |
+| **deleted[] 标记** | ✅ 已实现 | 删除扩展区域标记、相邻 pileup 更新 |
+| **excluded[] 排除** | ✅ 已实现 | 同聚物≥4 的排除标记 |
+| **Nanopore CCGG 排除** | ✅ 已实现 | CCGG motif 处设置 quality=0 |
+| **excludeMotifs()** | ✅ 已实现 | 长读长的同聚物和 CCGG 排除 |
+| **FASTA 输出** | ✅ 完全对齐 | `_pilon` 后缀 + 80 字符行宽 |
+
+### 默认参数
+
+| 参数 | Scala | PilonCpp |
+|------|-------|----------|
+| `chunkSize` | 10,000,000 | ✅ 10,000,000 |
+| `defaultQual` | 10 | ✅ 10 |
+| `diploid` | false (haploid 默认) | ✅ false |
+| `duplicates` | false (排除重复) | ✅ false |
+| `flank` (trusted) | 10 | ✅ 10 |
+| `gapMargin` | 100,000 | ✅ 100,000 |
+| `minDepth` | 0.1 (动态，均值×0.1) | ✅ 0.1 |
+| `minQual` | 0 | ✅ 0 |
+| `minMq` | 0 | ✅ 0 |
+| `minMinDepth` | 5 | ✅ 5 |
+| `strays` | true (有条件下启用) | ✅ true |
+| `trSafe` | true | ✅ true |
+| **默认 fix** | snps+indels+gaps+local | ✅ 全部启用 |
+
+### 已知差异（不影响核心短读长修复结果）
+
+| 功能 | Scala | PilonCpp | 启用条件 | 影响 |
+|------|-------|----------|---------|------|
+| **多线程** | ❌ 不支持 | ✅ 额外支持 | `--threads N` | C++ 额外功能 |
+| **fixCircles** | ✅ 环形 contig 闭合 | ❌ 未实现 | `--fix circles` | 仅实验功能 |
+| **fixNovel** | ✅ 新序列组装 | ❌ 未实现 | `--fix novel` | 仅实验功能 |
+| **Tracks** | ✅ IGV tracks 输出 | ❌ 未实现 | `--tracks` | 仅可视化 |
+| **copyNumber** | ✅ 拷贝数估计 | ❌ 未实现 | 内部使用 | 仅日志输出 |
+| **GC 计算** | ✅ 滑动窗口 GC | ❌ 未实现 | 内部使用 | 不影响修复 |
+| **fixLocal** | ✅ 局部重新组装 | ⚠️ 框架存在 | `--fix local` | 需要 GapFiller 补充 |
+
+### 验证建议
+
+```bash
+# 运行 PilonCpp
+./build/piloncpp -i ref.fa -o out_cpp --frags reads.bam --fix snps,indels
+
+# 运行 Scala 原版
+java -jar pilon-1.23.jar --genome ref.fa --output out_scala --frags reads.bam --fix snps,indels
+
+# 对比 FASTA
+diff <(samtools faidx out_cpp.fasta) <(samtools faidx out_scala.fasta)
+
+# 对比 VCF
+diff <(sort out_cpp.vcf) <(sort out_scala.vcf)
+```
+
+---
+
+### 性能对比
 
 | 指标 | Scala Pilon | PilonCpp |
 |------|-------------|----------|
