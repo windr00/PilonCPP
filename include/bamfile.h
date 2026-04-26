@@ -62,7 +62,7 @@ public:
     std::unordered_set<std::string> getSeqNames() const;
 
     // Process reads in a region
-    double process(const GenomeRegion& region, int printInterval = 100000);
+    double process(GenomeRegion& region, int printInterval = 100000);
 
     // Scan entire BAM for statistics
     void scan(const std::unordered_set<std::string>& seqsOfInterest);

@@ -98,7 +98,7 @@ int main(int argc, char* argv[]) {
                 // Skip if no call or depth too low
                 if (!bc.called() || pu.depth() < Pilon::minDepth) continue;
                 
-                char refBase = region.refBase(i);
+                char refBase = region.baseAt(i);
                 
                 // Write SNP variants
                 if (Pilon::fixSnps && bc.called() && !bc.isInsertion() && !bc.isDeletion()) {
@@ -130,14 +130,53 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    for (const auto& contig : contigs) {
-        outFile << ">" << contig.first << std::endl;
-        // Write sequence in 60-character lines
-        const std::string& seq = contig.second;
-        for (size_t i = 0; i < seq.length(); i += 60) {
-            outFile << seq.substr(i, 60) << std::endl;
+    // Write fixed sequences (matching Scala: reg._2 map { _.bases })
+    const auto& regions = genome.getProcessedRegions();
+    std::string currentName;
+    std::string currentSeq;
+    
+    for (const auto& region : regions) {
+        if (region.name != currentName) {
+            // Write previous contig if exists
+            if (!currentName.empty()) {
+                // Scala uses name_pilon suffix
+                std::string newName = currentName;
+                if (currentName.find('|') == std::string::npos) {
+                    newName += "_pilon";
+                } else if (currentName.back() == '|') {
+                    // keep as is
+                } else {
+                    newName += "|pilon";
+                }
+                outFile << ">" << newName << std::endl;
+                // Write sequence in 80-character lines (matching Scala)
+                for (size_t i = 0; i < currentSeq.length(); i += 80) {
+                    outFile << currentSeq.substr(i, 80) << std::endl;
+                }
+            }
+            currentName = region.name;
+            currentSeq.clear();
+        }
+        // Append fixed bases (matching Scala: reg._2 map { _.bases })
+        currentSeq += region.bases;
+    }
+    
+    // Write last contig
+    if (!currentName.empty()) {
+        std::string newName = currentName;
+        if (currentName.find('|') == std::string::npos) {
+            newName += "_pilon";
+        } else if (currentName.back() == '|') {
+            // keep as is
+        } else {
+            newName += "|pilon";
+        }
+        outFile << ">" << newName << std::endl;
+        for (size_t i = 0; i < currentSeq.length(); i += 80) {
+            outFile << currentSeq.substr(i, 80) << std::endl;
         }
     }
+    
     outFile.close();
 
     // Clean up

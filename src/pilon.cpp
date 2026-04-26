@@ -29,10 +29,10 @@ namespace pilon {
 const std::unordered_set<std::string> Pilon::fixChoices = {"snps", "indels", "gaps", "local"};
 const std::unordered_set<std::string> Pilon::experimentalFixChoices = {"amb", "breaks", "circles", "novel", "scaffolds"};
 
-bool Pilon::fixSnps = false;
-bool Pilon::fixIndels = false;
-bool Pilon::fixGaps = false;
-bool Pilon::fixLocal = false;
+bool Pilon::fixSnps = true;
+bool Pilon::fixIndels = true;
+bool Pilon::fixGaps = true;
+bool Pilon::fixLocal = true;
 bool Pilon::fixAmb = false;
 bool Pilon::fixBreaks = false;
 bool Pilon::fixCircles = false;
@@ -51,28 +51,28 @@ bool Pilon::vcf = false;
 bool Pilon::vcfQE = false;
 bool Pilon::debug = false;
 
-int Pilon::chunkSize = 100000;
-uint8_t Pilon::defaultQual = 30;
-bool Pilon::diploid = true;
-bool Pilon::duplicates = true;
+int Pilon::chunkSize = 10000000;
+uint8_t Pilon::defaultQual = 10;
+bool Pilon::diploid = false;
+bool Pilon::duplicates = false;
 bool Pilon::dumpReads = false;
 std::unordered_set<std::string> Pilon::fixList;
-int Pilon::flank = 1000;
-int Pilon::gapMargin = 100;
+int Pilon::flank = 10;
+int Pilon::gapMargin = 100000;
 bool Pilon::iupac = false;
-int Pilon::minMinDepth = 10;
+int Pilon::minMinDepth = 5;
 int Pilon::minGap = 10;
-double Pilon::minDepth = 10.0;
-int Pilon::minQual = 13;
-int Pilon::minMq = 5;
+double Pilon::minDepth = 0.1;
+int Pilon::minQual = 0;
+int Pilon::minMq = 0;
 bool Pilon::multiClosure = false;
 bool Pilon::nonPf = false;
 bool Pilon::oldIndel = false;
 bool Pilon::longread = false;
 bool Pilon::pacbio = false;
 bool Pilon::nanopore = false;
-bool Pilon::strays = false;
-bool Pilon::trSafe = false;
+bool Pilon::strays = true;
+bool Pilon::trSafe = true;
 
 std::vector<std::string> Pilon::novelContigs;
 
@@ -131,17 +131,17 @@ Options:
   --tracks          Output tracks for IGV
   --vcf             Output VCF file
   --vcfQE           Output VCF with quality estimates
-  --diploid         Assume diploid genome (default)
-  --haploid         Assume haploid genome
-  --duplicates      Include duplicate reads (default)
-  --no-duplicates   Exclude duplicate reads
-  --min-depth       Minimum depth for calling (default: 10)
-  --min-qual        Minimum base quality (default: 13)
-  --min-mq          Minimum mapping quality (default: 5)
-  --min-min-depth   Minimum minimum depth (default: 10)
-  --chunk-size      Chunk size for processing (default: 100000)
-  --flank           Flank size for gap filling (default: 1000)
-  --gap-margin      Gap margin (default: 100)
+  --diploid         Assume diploid genome (default: haploid)
+  --haploid         Assume haploid genome (default)
+  --duplicates      Include duplicate reads
+  --no-duplicates   Exclude duplicate reads (default)
+  --min-depth       Minimum depth for calling (default: 0.1 = 10% of mean coverage)
+  --min-qual        Minimum base quality (default: 0)
+  --min-mq          Minimum mapping quality (default: 0)
+  --min-min-depth   Minimum minimum depth (default: 5)
+  --chunk-size      Chunk size for processing (default: 10000000)
+  --flank           Flank size for trusted read region (default: 10)
+  --gap-margin      Gap margin (default: 100000)
   --min-gap         Minimum gap size to fill (default: 10)
   --outdir          Output directory
   --prefix          Output prefix
@@ -255,10 +255,12 @@ void Pilon::parseOptions(int argc, char* argv[]) {
         exit(1);
     }
     if (fixList.empty()) {
-        std::cerr << "Error: --fix is required (e.g., --fix snps,indels)" << std::endl;
-        printUsage();
-        exit(1);
+        // Scala default: all fixes enabled
+        fixList = fixChoices;
     }
+
+    // Scala: strays is only active when fixing gaps/local/scaffolds
+    strays = strays && (fixGaps || fixLocal || fixScaffolds);
 }
 
 } // namespace pilon

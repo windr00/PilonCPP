@@ -99,7 +99,6 @@ std::unordered_set<std::string> BamFile::getSeqNames() const {
     std::unordered_set<std::string> names;
     if (!header_) return names;
 
-    // Use sam_hdr_nref for newer htslib, fall back to sam_hdr_nseq
     int nseq = sam_hdr_nref(header_);
     for (int i = 0; i < nseq; i++) {
         const char* name = sam_hdr_tid2name(header_, i);
@@ -110,9 +109,8 @@ std::unordered_set<std::string> BamFile::getSeqNames() const {
     return names;
 }
 
-// Helper: check if mate is unmapped using mtid
+// Helper: check if mate is unmapped
 static bool isMateUnmapped(const bam1_t* bam) {
-    // In older htslib, mate_flag doesn't exist; use mtid == -1 as proxy
     return bam->core.mtid < 0;
 }
 
@@ -179,7 +177,6 @@ static std::vector<BamRead> queryRegion(const htsFile* fp, const bam_hdr_t* hdr,
     std::vector<BamRead> reads;
     if (!fp || !hdr) return reads;
 
-    // Cast away const for older htslib API
     int tid = sam_hdr_name2tid(const_cast<bam_hdr_t*>(hdr), refName.c_str());
     if (tid < 0) return reads;
 
@@ -206,7 +203,307 @@ static std::vector<BamRead> queryRegion(const htsFile* fp, const bam_hdr_t* hdr,
     return reads;
 }
 
-double BamFile::process(const GenomeRegion& region, int printInterval) {
+// Helper: get homo run length at position
+static int homoRun(const std::string& refBases, int i0) {
+    if (i0 < 0 || i0 >= static_cast<int>(refBases.size())) return 0;
+    char baseAtLoc = refBases[i0];
+    for (int i = i0 + 1; i < static_cast<int>(refBases.size()); i++) {
+        if (refBases[i] != baseAtLoc) return i - i0;
+    }
+    return static_cast<int>(refBases.size()) - i0;
+}
+
+// Helper: add a base to pileup
+static void addPileup(GenomeRegion& region, int locus, char base, int qual, int mq, bool pair) {
+    if (region.inRegion(locus)) {
+        int idx = region.index(locus);
+        if (pair) {
+            region.pileUpRegion(idx).add(base, qual, mq);
+            region.baseCount++;
+        } else {
+            region.pileUpRegion(idx).badPair++;
+        }
+    }
+}
+
+// Helper: remove a base from pileup
+static void removePileup(GenomeRegion& region, int locus, char base, int qual, int mq, bool pair) {
+    if (region.inRegion(locus)) {
+        int idx = region.index(locus);
+        if (pair) {
+            region.pileUpRegion(idx).remove(base, qual, mq);
+        } else {
+            region.pileUpRegion(idx).badPair--;
+        }
+    }
+}
+
+// Helper: physical coverage increment
+static int physCovIncr(GenomeRegion& region, int aStart, int aEnd, int iSize, bool paired, bool valid) {
+    if (!valid || (paired && iSize <= 0)) return 0;
+    
+    int start, end;
+    if (!paired) {
+        start = std::min(aStart, aEnd);
+        end = std::max(aStart, aEnd);
+    } else if (iSize > 0) {
+        start = aStart;
+        end = aStart + iSize;
+    } else {
+        end = aEnd + 1;
+        start = end + iSize; // iSize is negative
+    }
+    
+    int insertSize = end - start;
+    
+    if (region.inRegion(start)) {
+        region.pileUpRegion(region.index(start)).physCov++;
+        region.pileUpRegion(region.index(start)).insertSize += insertSize;
+    } else if (region.beforeRegion(start) && !region.beforeRegion(end)) {
+        region.physCovStart++;
+        region.insertSizeStart += insertSize;
+    }
+    
+    if (region.inRegion(end)) {
+        region.pileUpRegion(region.index(end)).physCov--;
+        region.pileUpRegion(region.index(end)).insertSize -= insertSize;
+    }
+    
+    return insertSize;
+}
+
+// Core: process a single read and add to pileups (matching Scala PileUpRegion.addRead)
+static void addReadToPileup(GenomeRegion& region, const bam1_t* bam, int longReadType) {
+    int length = bam->core.l_qseq;
+    if (length == 0) return;
+    
+    const uint8_t* bases = bam_get_seq(bam);
+    const uint8_t* quals = bam_get_qual(bam);
+    int mq = bam->core.qual;
+    bool paired = (bam->core.flag & BAM_FPAIRED) != 0;
+    
+    // Valid read check
+    bool valid = (mq >= Pilon::minMq) && 
+                 ((!paired) || ((bam->core.flag & BAM_FPROPER_PAIR) && 
+                   (bam->core.tid == bam->core.mtid)));
+    
+    int insert = bam->core.isize;
+    int aStart = bam->core.pos;
+    int aEnd = bam_endpos(bam);
+    
+    // Default qualities if none present (htslib stores absent quals as 0xFF or 0)
+    bool noQuals = (quals[0] == 0 || quals[0] == 0xFF);
+    if (noQuals && length > 0) {
+        for (int i = 1; i < length; i++) {
+            if (quals[i] != quals[0]) {
+                noQuals = false;
+                break;
+            }
+        }
+    }
+    // We create a mutable quality array so we can fix missing quals
+    std::vector<uint8_t> qualsVec(quals, quals + length);
+    if (noQuals) {
+        std::fill(qualsVec.begin(), qualsVec.end(), Pilon::defaultQual);
+    }
+    
+    // Trusted flank
+    int trustedFlank = Pilon::flank;
+    auto trusted = [trustedFlank, length](int offset) -> bool {
+        return offset >= trustedFlank && (length - trustedFlank) > offset;
+    };
+    
+    // Count clipped bases
+    uint32_t ncigar = bam->core.n_cigar;
+    const uint32_t* cigar = bam_get_cigar(bam);
+    int clippedBases = 0;
+    for (uint32_t i = 0; i < ncigar; i++) {
+        if (bam_cigar_op(cigar[i]) == BAM_CSOFT_CLIP) {
+            clippedBases += bam_cigar_oplen(cigar[i]);
+        }
+    }
+    
+    // Adjust MQ proportionally to fraction of bases clipped
+    int adjMq = Utils::roundDiv(mq * (length - clippedBases), length);
+    int indelMq = longReadType > 0 ? std::min(adjMq, 8) : adjMq;
+    
+    // Decode bases to chars
+    std::vector<char> baseChars(length);
+    for (int i = 0; i < length; i++) {
+        int base = bases[i] & 0xF;
+        if (base == 1) baseChars[i] = 'A';
+        else if (base == 2) baseChars[i] = 'C';
+        else if (base == 4) baseChars[i] = 'G';
+        else if (base == 8) baseChars[i] = 'T';
+        else baseChars[i] = 'N';
+    }
+    
+    // Parse CIGAR and add to pileups
+    int readOffset = 0;
+    int refOffset = 0;
+    
+    for (uint32_t i = 0; i < ncigar; i++) {
+        int len = bam_cigar_oplen(cigar[i]);
+        int op = bam_cigar_op(cigar[i]);
+        int locus = aStart + refOffset;
+        
+        switch (op) {
+            case BAM_CINS: { // Insertion
+                if (valid && trusted(readOffset) && region.inRegion(locus)) {
+                    // Get insertion sequence
+                    std::vector<uint8_t> insertion(len);
+                    for (int j = 0; j < len; j++) {
+                        insertion[j] = static_cast<uint8_t>(baseChars[readOffset + j]);
+                    }
+                    
+                    // Reposition insertion (matching Scala: while iloc > 1 && refBases(iloc - 2) == insertion(len - 1))
+                    // Scala is 1-based, C++ is 0-based: iloc > 1 (1-based) = iloc > 0 (0-based)
+                    // refBases(iloc - 2) in 1-based = refBase(iloc - 2) in 0-based
+                    int iloc = locus;
+                    while (iloc > 0 && region.inRegion(iloc - 1) &&
+                           region.refBase(iloc - 1) == baseChars[readOffset + len - 1]) {
+                        iloc--;
+                        // Rotate insertion
+                        char last = insertion.back();
+                        insertion.pop_back();
+                        insertion.insert(insertion.begin(), last);
+                    }
+                    
+                    // Skip if in homopolymer run (for long reads)
+                    if (!(longReadType > 0 && homoRun(region.contigBases, iloc - region.start) >= 4)) {
+                        int idx = region.index(iloc);
+                        if (idx >= 0 && idx < region.size()) {
+                            uint8_t qual = qualsVec[readOffset];
+                            region.pileUpRegion(idx).addInsertion(insertion, qual, indelMq);
+                        }
+                    }
+                }
+                break;
+            }
+            case BAM_CDEL: { // Deletion
+                if (valid && trusted(readOffset) && region.inRegion(locus) && 
+                    region.inRegion(locus + len - 1)) {
+                    int dloc = locus;
+                    int rloc = readOffset;
+                    
+                    // Slide deletion (matching Scala: while dloc > 1 && rloc > 0 && refBases(dloc - 2) == refBases(dloc + len - 2))
+                    // Scala: dloc is 1-based, refBases is 0-based
+                    // C++: dloc is 0-based, refBase() is 0-based
+                    // dloc > 1 (1-based) = dloc > 0 (0-based)
+                    // refBases(dloc - 2) (1-based dloc) = refBase(dloc - 1) (0-based dloc)
+                    // refBases(dloc + len - 2) (1-based dloc) = refBase(dloc + len - 1) (0-based dloc)
+                    while (dloc > 0 && rloc > 0 && 
+                           region.inRegion(dloc - 1) && region.inRegion(dloc + len - 1) &&
+                           region.refBase(dloc - 1) == region.refBase(dloc + len - 1)) {
+                        dloc--;
+                        rloc--;
+                        char base = baseChars[rloc];
+                        uint8_t qual = qualsVec[rloc];
+                        
+                        if (trusted(rloc) && region.inRegion(dloc)) {
+                            removePileup(region, dloc, base, qual, adjMq, valid);
+                            if (region.inRegion(dloc + len)) {
+                                addPileup(region, dloc + len, base, qual, adjMq, valid);
+                            }
+                        }
+                    }
+                    
+                    // Skip if in homopolymer run (for long reads)
+                    // Scala: also check nanoporeExclude for nanopore reads
+                    bool skipDeletion = (longReadType > 0 && homoRun(region.contigBases, dloc - region.start) >= 4);
+                    if (!skipDeletion && longReadType == BamFile::nanoporeLongRead) {
+                        skipDeletion = region.nanoporeExclude(dloc - region.start);
+                    }
+                    if (!skipDeletion) {
+                        // Get deletion sequence from reference
+                        // Scala: refBases.slice(dloc - 1, dloc + len - 1) where dloc is 1-based
+                        // C++: dloc is 0-based, so range is [dloc, dloc + len) = len elements
+                        std::vector<uint8_t> deletion;
+                        for (int j = dloc; j < dloc + len; j++) {
+                            if (region.inRegion(j)) {
+                                deletion.push_back(static_cast<uint8_t>(region.refBase(j)));
+                            }
+                        }
+                        
+                        if (!deletion.empty()) {
+                            int idx = region.index(dloc);
+                            if (idx >= 0 && idx < region.size()) {
+                                uint8_t qual = qualsVec[readOffset];
+                                region.pileUpRegion(idx).addDeletion(deletion, qual, indelMq);
+                            }
+                        }
+                    }
+                }
+                break;
+            }
+            case BAM_CMATCH: // M, EQ, X
+            case BAM_CEQUAL:
+            case BAM_CDIFF: {
+                for (int j = 0; j < len; j++) {
+                    int rOff = readOffset + j;
+                    if (trusted(rOff)) {
+                        int locusPlus = locus + j;
+                        char base = baseChars[rOff];
+                        uint8_t qual = qualsVec[rOff];
+                        // Scala: Nanopore CCGG motif exclude (set qual=0)
+                        if (longReadType == BamFile::nanoporeLongRead &&
+                            region.inRegion(locusPlus) &&
+                            region.nanoporeExclude(region.index(locusPlus))) {
+                            qual = 0;
+                        }
+                        addPileup(region, locusPlus, base, qual, adjMq, valid);
+                    }
+                }
+                break;
+            }
+            case BAM_CSOFT_CLIP: { // Soft clip
+                int clipStart = (readOffset == 0) ? locus - len : locus;
+                int clipEnd = clipStart + len - 1;
+                
+                if (region.inRegion(clipStart)) {
+                    region.pileUpRegion(region.index(clipStart)).clips++;
+                }
+                if (region.inRegion(clipEnd)) {
+                    region.pileUpRegion(region.index(clipEnd)).clips++;
+                }
+                
+                for (int j = 0; j < len; j++) {
+                    int rOff = readOffset + j;
+                    int locusPlus = clipStart + j;
+                    char base = baseChars[rOff];
+                    uint8_t qual = qualsVec[rOff];
+                    if (region.inRegion(locusPlus)) {
+                        addPileup(region, locusPlus, base, qual, adjMq, false);
+                    }
+                }
+                break;
+            }
+            case BAM_CHARD_CLIP: // Hard clip - nothing to do
+                break;
+            case BAM_CREF_SKIP: // N - skip reference bases
+                break;
+            default:
+                if (Pilon::verbose) {
+                    std::cerr << "Unknown CIGAR op=" << bam_cigar_opchr(op) 
+                              << " in read " << bam_get_qname(bam) << std::endl;
+                }
+                break;
+        }
+        
+        // Update offsets - manually check CIGAR op types for older htslib
+        bool consumesRead = (op == BAM_CMATCH || op == BAM_CINS || op == BAM_CSOFT_CLIP || 
+                             op == BAM_CEQUAL || op == BAM_CDIFF);
+        bool consumesRef = (op == BAM_CMATCH || op == BAM_CDEL || op == BAM_CREF_SKIP || 
+                            op == BAM_CEQUAL || op == BAM_CDIFF);
+        if (consumesRead) readOffset += len;
+        if (consumesRef) refOffset += len;
+    }
+    
+    region.readCount++;
+    physCovIncr(region, aStart, aEnd, insert, paired, valid);
+}
+
+double BamFile::process(GenomeRegion& region, int printInterval) {
     if (!htsFile_) {
         if (!open()) return 0;
     }
@@ -234,6 +531,10 @@ double BamFile::process(const GenomeRegion& region, int printInterval) {
         }
 
         if (validateRead(bam)) {
+            // Add read to pileup with full CIGAR parsing
+            addReadToPileup(region, bam, longReadType_);
+            
+            // Track insert size statistics
             int insertSize = std::abs(bam->core.isize);
             bool rc = (bam->core.flag & BAM_FREVERSE) != 0;
             addInsert(insertSize, rc);
@@ -328,7 +629,6 @@ std::vector<BamRead> BamFile::recruitFlankReads(const Region& region) const {
     
     // Handle stray mates if Pilon::strays is set
     if (Pilon::strays) {
-        // Build a temporary mate map from the flank reads
         std::unordered_map<std::string, BamRead> readMap1;
         std::unordered_map<std::string, BamRead> readMap2;
         for (const auto& r : reads) {
@@ -339,10 +639,8 @@ std::vector<BamRead> BamFile::recruitFlankReads(const Region& region) const {
             }
         }
         
-        // Find strays: reads in one map but not the other
         for (const auto& [name, read] : readMap1) {
             if (readMap2.find(name) == readMap2.end()) {
-                // Look up mate from the global stray mate map
                 BamRead* mate = strayMateMap_.lookupMate(read);
                 if (mate) reads.push_back(*mate);
             }

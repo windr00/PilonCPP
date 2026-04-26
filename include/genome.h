@@ -23,6 +23,7 @@
 #include <vector>
 #include <unordered_map>
 #include <sstream>
+#include <cstdint>
 #include "pileup.h"
 
 namespace pilon {
@@ -57,12 +58,47 @@ struct GenomeRegion {
     int stop;        // 0-based stop (exclusive)
     std::string contigBases;
     std::string originalBases;
+    std::string bases;  // Fixed sequence (output)
     std::vector<PileUp> pileUps;
     double minDepth;
+
+    // Physical coverage tracking
+    long long physCovStart;
+    long long insertSizeStart;
 
     // Fix record: position, old sequence, new sequence
     using Fix = std::tuple<int, std::string, std::string>;
     std::vector<Fix> fixes;
+
+    // Read count tracking
+    long long readCount;
+    long long baseCount;
+
+    // Change tracking (matching Scala changeMap)
+    enum ChangeKind { SNP, INS, DEL, AMB };
+    struct Change {
+        int index;
+        ChangeKind kind;
+        PileUp pu;
+    };
+    std::vector<Change> changes_;
+
+    // Disposition arrays (matching Scala)
+    std::vector<bool> confirmed;
+    std::vector<bool> ambiguous;
+    std::vector<bool> changed;
+    std::vector<bool> deleted;
+    std::vector<bool> excluded;
+
+    // Summary stats arrays (matching Scala)
+    std::vector<int> coverage_arr;
+    std::vector<int> badCoverage_arr;
+    std::vector<int> clips_arr;
+    std::vector<int> insertSize_arr;
+    std::vector<int> physCoverage_arr;
+    std::vector<int> fragCoverage_arr;
+    std::vector<int8_t> weightedQual_arr;
+    std::vector<int8_t> weightedMq_arr;
 
     GenomeRegion(const std::string& name, int start, int stop,
                  const std::string& bases, double minDepth);
@@ -76,6 +112,28 @@ struct GenomeRegion {
     PileUp& pileUpRegion(int index);
     const PileUp& pileUpRegion(int index) const;
     int locus(int index) const;
+
+    // Region helpers (matching Scala Region class)
+    bool inRegion(int locus) const;
+    bool beforeRegion(int locus) const;
+    bool afterRegion(int locus) const;
+    int index(int locus) const;
+
+    // Homo run and nanopore exclude (matching Scala)
+    int homoRun(int loc) const;
+    bool nanoporeExclude(int idx) const;
+    void excludeMotifs();
+
+    // Post-processing
+    void computePhysCov();
+    void postProcess();
+
+    // Core fixing logic
+    void identifyAndFixIssues();
+
+    // Write methods
+    void writeVcf(FILE* writer) const;
+    void writeChanges(FILE* writer, const std::string& newName, int& offset) const;
 };
 
 // FASTA genome file reader

@@ -65,7 +65,7 @@ void Vcf::writeRecord(const GenomeRegion& region, int index,
     if (!bc.called()) return;
 
     int pos = region.locus(index) + 1; // VCF is 1-based
-    char refBase = region.refBase(index);
+    char refBase = region.baseAt(index);
 
     std::string call = bc.callString(indelOkArg);
     if (call.empty() || call == std::string(1, refBase)) return;
