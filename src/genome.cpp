@@ -23,8 +23,66 @@
 #include <fstream>
 #include <iostream>
 #include <sstream>
+#include <thread>
+#include <mutex>
+#include <atomic>
+#include <condition_variable>
+#include <queue>
+#include <functional>
+#include <vector>
 
 namespace pilon {
+
+// Thread-safe output mutex
+static std::mutex coutMutex;
+
+// Helper: process a single chunk (called from worker threads)
+static void processChunk(const std::string& name,
+                         const std::string& seq,
+                         int chunkStart, int chunkStop,
+                         std::vector<BamFile*>& bamFiles,
+                         std::vector<GenomeRegion>& results,
+                         std::mutex& resultsMutex,
+                         std::atomic<int>& completedChunks,
+                         int totalChunks) {
+    // Each thread opens its own BAM file handles (htslib is NOT thread-safe)
+    std::vector<BamFile*> threadBams;
+    for (auto* bam : bamFiles) {
+        if (bam) {
+            auto* threadBam = new BamFile(bam->path(), bam->bamType(), bam->subType());
+            threadBam->open();
+            threadBams.push_back(threadBam);
+        }
+    }
+
+    GenomeRegion region(name, chunkStart, chunkStop,
+                        seq.substr(chunkStart, chunkStop - chunkStart),
+                        Pilon::minDepth);
+
+    // Process each BAM file
+    for (auto* bam : threadBams) {
+        bam->process(region);
+    }
+
+    // Store result in thread-safe manner
+    {
+        std::lock_guard<std::mutex> lock(resultsMutex);
+        results.push_back(std::move(region));
+    }
+
+    int done = ++completedChunks;
+    if (Pilon::verbose || done % 10 == 0 || done == totalChunks) {
+        std::lock_guard<std::mutex> lock(coutMutex);
+        std::cout << "  [" << done << "/" << totalChunks << "] Chunk "
+                  << chunkStart << "-" << chunkStop << " done" << std::endl;
+    }
+
+    // Clean up thread-local BAM handles
+    for (auto* bam : threadBams) {
+        bam->close();
+        delete bam;
+    }
+}
 
 GenomeRegion::GenomeRegion(const std::string& name, int start, int stop,
                            const std::string& bases, double minDepth)
@@ -155,7 +213,53 @@ std::vector<std::pair<std::string, std::string>> GenomeFile::parseTargets() {
 
 void GenomeFile::processRegions(std::vector<BamFile*>& bamFiles) {
     auto contigs = targets_.empty() ? contigs_ : parseTargets();
+    int numThreads = Pilon::threads;
 
+    if (numThreads <= 1) {
+        // Single-threaded mode (original behavior)
+        for (const auto& contig : contigs) {
+            const std::string& name = contig.first;
+            const std::string& seq = contig.second;
+            int length = static_cast<int>(seq.size());
+
+            std::cout << "Processing " << name << " (" << length << " bp)" << std::endl;
+
+            for (int chunkStart = 0; chunkStart < length; chunkStart += Pilon::chunkSize) {
+                int chunkStop = std::min(chunkStart + Pilon::chunkSize, length);
+
+                GenomeRegion region(name, chunkStart, chunkStop,
+                                   seq.substr(chunkStart, chunkStop - chunkStart),
+                                   Pilon::minDepth);
+
+                for (auto* bam : bamFiles) {
+                    if (bam) {
+                        bam->process(region);
+                    }
+                }
+
+                processedRegions_.push_back(std::move(region));
+
+                if (Pilon::verbose) {
+                    std::cout << "  Chunk " << chunkStart << "-" << chunkStop << " done" << std::endl;
+                }
+            }
+        }
+        return;
+    }
+
+    // Multi-threaded mode
+    std::cout << "Using " << numThreads << " threads for processing" << std::endl;
+
+    // Collect all chunks across all contigs
+    struct ChunkTask {
+        std::string name;
+        std::string seq;  // We store the full seq per contig, substr in worker
+        int chunkStart;
+        int chunkStop;
+        int contigLength;
+    };
+
+    std::vector<ChunkTask> tasks;
     for (const auto& contig : contigs) {
         const std::string& name = contig.first;
         const std::string& seq = contig.second;
@@ -163,29 +267,66 @@ void GenomeFile::processRegions(std::vector<BamFile*>& bamFiles) {
 
         std::cout << "Processing " << name << " (" << length << " bp)" << std::endl;
 
-        // Process in chunks
         for (int chunkStart = 0; chunkStart < length; chunkStart += Pilon::chunkSize) {
             int chunkStop = std::min(chunkStart + Pilon::chunkSize, length);
-
-            GenomeRegion region(name, chunkStart, chunkStop,
-                               seq.substr(chunkStart, chunkStop - chunkStart),
-                               Pilon::minDepth);
-
-            // Process each BAM file
-            for (auto* bam : bamFiles) {
-                if (bam) {
-                    bam->process(region);
-                }
-            }
-
-            // Store processed region for later VCF output
-            processedRegions_.push_back(std::move(region));
-
-            if (Pilon::verbose) {
-                std::cout << "  Chunk " << chunkStart << "-" << chunkStop << " done" << std::endl;
-            }
+            tasks.push_back({name, seq, chunkStart, chunkStop, length});
         }
     }
+
+    int totalChunks = static_cast<int>(tasks.size());
+    std::cout << "Total chunks: " << totalChunks << std::endl;
+
+    // Thread-safe results storage
+    std::mutex resultsMutex;
+    std::atomic<int> completedChunks(0);
+
+    // Pre-allocate results vector
+    processedRegions_.reserve(totalChunks);
+
+    // Launch worker threads
+    std::vector<std::thread> workers;
+    workers.reserve(numThreads);
+
+    // Simple work-stealing queue with mutex
+    std::mutex taskMutex;
+    std::queue<size_t> taskQueue;
+    for (size_t i = 0; i < tasks.size(); i++) {
+        taskQueue.push(i);
+    }
+
+    auto workerFunc = [&]() {
+        while (true) {
+            size_t taskIdx;
+            {
+                std::lock_guard<std::mutex> lock(taskMutex);
+                if (taskQueue.empty()) return;
+                taskIdx = taskQueue.front();
+                taskQueue.pop();
+            }
+
+            const auto& task = tasks[taskIdx];
+            processChunk(task.name, task.seq, task.chunkStart, task.chunkStop,
+                        bamFiles, processedRegions_, resultsMutex,
+                        completedChunks, totalChunks);
+        }
+    };
+
+    for (int i = 0; i < numThreads; i++) {
+        workers.emplace_back(workerFunc);
+    }
+
+    for (auto& t : workers) {
+        t.join();
+    }
+
+    // Sort results by genomic position (chunks may have completed out of order)
+    std::sort(processedRegions_.begin(), processedRegions_.end(),
+              [](const GenomeRegion& a, const GenomeRegion& b) {
+                  if (a.name != b.name) return a.name < b.name;
+                  return a.start < b.start;
+              });
+
+    std::cout << "Multi-threaded processing complete: " << totalChunks << " chunks" << std::endl;
 }
 
 } // namespace pilon

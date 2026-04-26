@@ -86,6 +86,9 @@ public:
     // Global computed data
     static std::vector<std::string> novelContigs;
 
+    // Threading
+    static int threads;
+
     // For logging
     static std::vector<std::string> commandArgs;
 

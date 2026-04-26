@@ -75,6 +75,11 @@ bool Pilon::strays = false;
 bool Pilon::trSafe = false;
 
 std::vector<std::string> Pilon::novelContigs;
+
+// Threading
+int Pilon::threads = 1;
+
+// For logging
 std::vector<std::string> Pilon::commandArgs;
 
 void Pilon::parseFixList(const std::string& fix) {
@@ -143,6 +148,7 @@ Options:
   --targets         Target regions file
   --verbose         Verbose output
   --debug           Debug output
+  --threads         Number of threads to use (default: 1)
   --help, -h        Show this help message
 )";
 }
@@ -181,6 +187,7 @@ void Pilon::parseOptions(int argc, char* argv[]) {
         {"targets",       required_argument, 0, 'T'},
         {"verbose",       no_argument,       0, 'V'},
         {"debug",         no_argument,       0, 'Z'},
+        {"threads",       required_argument, 0, 1},
         {"help",          no_argument,       0, 'h'},
         {0, 0, 0, 0}
     };
@@ -221,6 +228,7 @@ void Pilon::parseOptions(int argc, char* argv[]) {
             case 'T': targets = optarg; break;
             case 'V': verbose = true; break;
             case 'Z': debug = true; break;
+            case 1:   threads = std::stoi(optarg); break;
             case 'h':
                 printHelp();
                 exit(0);
