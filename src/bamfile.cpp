@@ -122,9 +122,8 @@ static BamRead bamToRead(const bam1_t* bam, const bam_hdr_t* hdr) {
     // Convert encoded bases (4 bits per base) to ASCII
     std::string decoded;
     decoded.reserve(bam->core.l_qseq);
-    const uint8_t* seq = bam_get_seq(bam);
     for (int i = 0; i < bam->core.l_qseq; i++) {
-        int base = seq[i] & 0xF;
+        int base = bam_seqi(bam_get_seq(bam), i);
         if (base == 1) decoded += 'A';
         else if (base == 2) decoded += 'C';
         else if (base == 4) decoded += 'G';
@@ -276,8 +275,7 @@ static int physCovIncr(GenomeRegion& region, int aStart, int aEnd, int iSize, bo
 static void addReadToPileup(GenomeRegion& region, const bam1_t* bam, int longReadType) {
     int length = bam->core.l_qseq;
     if (length == 0) return;
-    
-    const uint8_t* bases = bam_get_seq(bam);
+
     const uint8_t* quals = bam_get_qual(bam);
     int mq = bam->core.qual;
     bool paired = (bam->core.flag & BAM_FPAIRED) != 0;
@@ -327,10 +325,10 @@ static void addReadToPileup(GenomeRegion& region, const bam1_t* bam, int longRea
     int adjMq = Utils::roundDiv(mq * (length - clippedBases), length);
     int indelMq = longReadType > 0 ? std::min(adjMq, 8) : adjMq;
     
-    // Decode bases to chars
+    // Decode bases to chars (htslib stores bases as 4-bit interleaved pairs)
     std::vector<char> baseChars(length);
     for (int i = 0; i < length; i++) {
-        int base = bases[i] & 0xF;
+        int base = bam_seqi(bam_get_seq(bam), i);
         if (base == 1) baseChars[i] = 'A';
         else if (base == 2) baseChars[i] = 'C';
         else if (base == 4) baseChars[i] = 'G';

@@ -15,7 +15,6 @@
  * You should have received a copy of the GNU General Public License
  * along with PilonCpp.  If not, see <http://www.gnu.org/licenses/>.
  */
-
 #include "genome.h"
 #include "utils.h"
 #include "pilon.h"
@@ -33,12 +32,9 @@
 #include <vector>
 #include <algorithm>
 #include <cmath>
-
 namespace pilon {
-
 // Thread-safe output mutex
 static std::mutex coutMutex;
-
 // =============================================================================
 // Helper: process a single chunk (called from worker threads)
 // =============================================================================
@@ -58,39 +54,31 @@ static void processChunk(const std::string& name,
             threadBams.push_back(threadBam);
         }
     }
-
     GenomeRegion region(name, chunkStart, chunkStop,
                         seq.substr(chunkStart, chunkStop - chunkStart),
                         Pilon::minDepth);
-
     for (auto* bam : threadBams) {
         bam->process(region);
     }
-
     region.postProcess();
-
     if (Pilon::fixSnps || Pilon::fixIndels || Pilon::fixGaps || Pilon::fixLocal) {
         region.identifyAndFixIssues();
     }
-
     {
         std::lock_guard<std::mutex> lock(resultsMutex);
         results.push_back(std::move(region));
     }
-
     int done = ++completedChunks;
     if (Pilon::verbose || done % 10 == 0 || done == totalChunks) {
         std::lock_guard<std::mutex> lock(coutMutex);
         std::cout << "  [" << done << "/" << totalChunks << "] Chunk "
                   << chunkStart << "-" << chunkStop << " done" << std::endl;
     }
-
     for (auto* bam : threadBams) {
         bam->close();
         delete bam;
     }
 }
-
 // =============================================================================
 // GenomeRegion constructor
 // =============================================================================
@@ -115,67 +103,53 @@ GenomeRegion::GenomeRegion(const std::string& name, int start, int stop,
     weightedQual_arr.resize(sz, 0);
     weightedMq_arr.resize(sz, 0);
 }
-
 // =============================================================================
 // Basic accessors
 // =============================================================================
 int GenomeRegion::size() const { return stop - start; }
-
 char GenomeRegion::baseAt(int pos) const {
     if (pos >= 0 && pos < static_cast<int>(contigBases.size()))
         return contigBases[pos];
     return 'N';
 }
-
 char GenomeRegion::originalBaseAt(int pos) const {
     if (pos >= 0 && pos < static_cast<int>(originalBases.size()))
         return originalBases[pos];
     return 'N';
 }
-
 char GenomeRegion::refBase(int pos) const {
     int localPos = pos - start;
     return baseAt(localPos);
 }
-
 std::string GenomeRegion::subString(int start, int length) const {
     if (start < 0 || start >= static_cast<int>(contigBases.size())) return "";
     int len = std::min(length, static_cast<int>(contigBases.size()) - start);
     return contigBases.substr(start, len);
 }
-
 std::string GenomeRegion::refSubString(int start, int length) const {
     return subString(start, length);
 }
-
 PileUp& GenomeRegion::pileUpRegion(int index) {
     return pileUps[index];
 }
-
 const PileUp& GenomeRegion::pileUpRegion(int index) const {
     return pileUps[index];
 }
-
 int GenomeRegion::locus(int index) const {
     return start + index;
 }
-
 bool GenomeRegion::inRegion(int locus) const {
     return locus >= start && locus < stop;
 }
-
 bool GenomeRegion::beforeRegion(int locus) const {
     return locus < start;
 }
-
 bool GenomeRegion::afterRegion(int locus) const {
     return locus >= stop;
 }
-
 int GenomeRegion::index(int locus) const {
     return locus - start;
 }
-
 // =============================================================================
 // Homo run and nanopore exclude (matching Scala)
 // =============================================================================
@@ -187,7 +161,6 @@ int GenomeRegion::homoRun(int loc) const {
     }
     return static_cast<int>(contigBases.size()) - loc;
 }
-
 bool GenomeRegion::nanoporeExclude(int idx) const {
     return (idx - 2 >= 0 && idx + 2 < static_cast<int>(contigBases.size()) &&
             contigBases[idx - 2] == 'C' &&
@@ -195,19 +168,15 @@ bool GenomeRegion::nanoporeExclude(int idx) const {
             contigBases[idx + 1] == 'G' &&
             contigBases[idx + 2] == 'G');
 }
-
 void GenomeRegion::excludeMotifs() {
     bool pb = Pilon::pacbio;
     bool nano = Pilon::nanopore;
     bool lr = pb || nano;
-
     if (!lr) return;
-
     for (int i = 0; i < static_cast<int>(contigBases.size()); i++) {
         excluded[i] = (homoRun(i) >= 4) || (nano && nanoporeExclude(i));
     }
 }
-
 // =============================================================================
 // Physical coverage computation (matching Scala PileUpRegion.computePhysCov)
 // =============================================================================
@@ -228,7 +197,6 @@ void GenomeRegion::computePhysCov() {
         }
     }
 }
-
 // =============================================================================
 // Post-process: collect changes from pileups (matching Scala postProcess)
 // =============================================================================
@@ -265,7 +233,6 @@ void GenomeRegion::postProcess() {
     
     // Pass 1: pull out values from pileups & call base changes
     bool fixamb = Pilon::iupac || Pilon::fixAmb;
-    
     for (int i = 0; i < size(); i++) {
         const PileUp& pu = pileUps[i];
         long long n = pu.depth();
@@ -316,6 +283,7 @@ void GenomeRegion::postProcess() {
                                         bc.altBase, std::string(), std::string(),
                                         bc.homoIndel, bc.indel});
                 }
+            } else {
             }
         }
     }
@@ -323,7 +291,6 @@ void GenomeRegion::postProcess() {
     // Pass 2: computed values (simplified for now)
     // Scala also computes copyNumber, fragCoverageDist here
 }
-
 // =============================================================================
 // fixFixList: Sort and remove overlapping fixes (matching Scala)
 // =============================================================================
@@ -367,7 +334,6 @@ static std::vector<GenomeRegion::Fix> fixFixList(const std::vector<GenomeRegion:
     
     return outList;
 }
-
 // =============================================================================
 // fixIssues: Apply fixes to bases (matching Scala fixIssues)
 // =============================================================================
@@ -497,7 +463,6 @@ void GenomeRegion::identifyAndFixIssues() {
     fixes.insert(fixes.end(), smallFixList.begin(), smallFixList.end());
     fixes.insert(fixes.end(), bigFixList.begin(), bigFixList.end());
 }
-
 // =============================================================================
 // Write VCF record
 // =============================================================================
@@ -539,7 +504,6 @@ void GenomeRegion::writeVcf(FILE* writer) const {
         }
     }
 }
-
 // =============================================================================
 // Write changes
 // =============================================================================
@@ -553,7 +517,6 @@ void GenomeRegion::writeChanges(FILE* writer, const std::string& newName, int& o
     }
     offset += static_cast<int>(bases.size()) - size();
 }
-
 // =============================================================================
 // GenomeFile implementation
 // =============================================================================
@@ -561,22 +524,18 @@ GenomeFile::GenomeFile(const std::string& path, const std::string& targets)
     : targets_(targets) {
     parseFasta(path);
 }
-
 void GenomeFile::parseFasta(const std::string& path) {
     std::ifstream file(path);
     if (!file.is_open()) {
         std::cerr << "Error: Cannot open genome file: " << path << std::endl;
         exit(1);
     }
-
     std::string line;
     std::string currentName;
     std::string currentSeq;
-
     while (std::getline(file, line)) {
         line = Utils::trim(line);
         if (line.empty()) continue;
-
         if (line[0] == '>') {
             if (!currentName.empty()) {
                 contigs_.push_back({currentName, currentSeq});
@@ -594,11 +553,9 @@ void GenomeFile::parseFasta(const std::string& path) {
         contigs_.push_back({currentName, currentSeq});
     }
 }
-
 std::vector<std::pair<std::string, std::string>> GenomeFile::getContigs() const {
     return contigs_;
 }
-
 std::vector<std::pair<std::string, int>> GenomeFile::getContigSizes() const {
     std::vector<std::pair<std::string, int>> sizes;
     for (const auto& contig : contigs_) {
@@ -606,7 +563,6 @@ std::vector<std::pair<std::string, int>> GenomeFile::getContigSizes() const {
     }
     return sizes;
 }
-
 std::vector<std::pair<std::string, std::string>> GenomeFile::parseTargets() {
     if (targets_.empty()) return contigs_;
     std::string content = Utils::readFile(targets_);
@@ -629,41 +585,32 @@ std::vector<std::pair<std::string, std::string>> GenomeFile::parseTargets() {
     }
     return result;
 }
-
 void GenomeFile::processRegions(std::vector<BamFile*>& bamFiles) {
     auto contigs = targets_.empty() ? contigs_ : parseTargets();
     int numThreads = Pilon::threads;
-
     if (numThreads <= 1) {
         for (const auto& contig : contigs) {
             const std::string& name = contig.first;
             const std::string& seq = contig.second;
             int length = static_cast<int>(seq.size());
             std::cout << "Processing " << name << " (" << length << " bp)" << std::endl;
-
             for (int chunkStart = 0; chunkStart < length; chunkStart += Pilon::chunkSize) {
                 int chunkStop = std::min(chunkStart + Pilon::chunkSize, length);
                 GenomeRegion region(name, chunkStart, chunkStop,
                                    seq.substr(chunkStart, chunkStop - chunkStart),
                                    Pilon::minDepth);
-
                 for (auto* bam : bamFiles) {
                     if (bam) bam->process(region);
                 }
-
                 region.postProcess();
-
                 if (Pilon::fixSnps || Pilon::fixIndels || Pilon::fixGaps || Pilon::fixLocal) {
                     region.identifyAndFixIssues();
                 }
-
                 processedRegions_.push_back(std::move(region));
-
                 // Free per-chunk memory unless VCF output is needed
                 if (!Pilon::vcf) {
                     processedRegions_.back().freeMemory();
                 }
-
                 if (Pilon::verbose) {
                     std::cout << "  Chunk " << chunkStart << "-" << chunkStop << " done" << std::endl;
                 }
@@ -671,7 +618,6 @@ void GenomeFile::processRegions(std::vector<BamFile*>& bamFiles) {
         }
         return;
     }
-
     // Multi-threaded mode
     std::cout << "Using " << numThreads << " threads for processing" << std::endl;
     struct ChunkTask { std::string name; std::string seq; int chunkStart; int chunkStop; };
@@ -686,7 +632,6 @@ void GenomeFile::processRegions(std::vector<BamFile*>& bamFiles) {
             tasks.push_back({name, seq, chunkStart, chunkStop});
         }
     }
-
     int totalChunks = static_cast<int>(tasks.size());
     std::cout << "Total chunks: " << totalChunks << std::endl;
     std::mutex resultsMutex;
@@ -697,7 +642,6 @@ void GenomeFile::processRegions(std::vector<BamFile*>& bamFiles) {
     std::mutex taskMutex;
     std::queue<size_t> taskQueue;
     for (size_t i = 0; i < tasks.size(); i++) taskQueue.push(i);
-
     auto workerFunc = [&]() {
         while (true) {
             size_t taskIdx;
@@ -713,10 +657,8 @@ void GenomeFile::processRegions(std::vector<BamFile*>& bamFiles) {
                         completedChunks, totalChunks);
         }
     };
-
     for (int i = 0; i < numThreads; i++) workers.emplace_back(workerFunc);
     for (auto& t : workers) t.join();
-
     std::sort(processedRegions_.begin(), processedRegions_.end(),
               [](const GenomeRegion& a, const GenomeRegion& b) {
                   if (a.name != b.name) return a.name < b.name;
@@ -732,5 +674,4 @@ void GenomeFile::processRegions(std::vector<BamFile*>& bamFiles) {
     
     std::cout << "Multi-threaded processing complete: " << totalChunks << " chunks" << std::endl;
 }
-
 } // namespace pilon
