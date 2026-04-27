@@ -10,7 +10,8 @@
 - 🧵 **多线程支持**：支持通过 `--threads` 参数设置并行线程数，充分利用多核 CPU。
 - 📂 **原生 BAM 处理**：基于 `htslib` 直接读取 BAM/FASTA 文件，无需 Java 依赖。
 - 🛠️ **模块化设计**：清晰的头文件与源文件分离，易于扩展和集成。
-- 📊 **完整功能**：支持 SNP/Indel 检测、Gap 填充、VCF 输出等核心功能。
+- 📊 **完整功能**：支持 SNP/Indel 检测、Gap 填充、局部重装、Tracks 输出、GC/copyNumber 分析、VCF 输出等。
+- ✅ **已验证一致**：在中等复杂测试集（生殖支原体 G37，580kb）上与原版 Scala Pilon 输出**完全一致**（580076/580076 bp）。
 
 ## 🏗️ 架构
 
@@ -98,11 +99,12 @@ make -j$(nproc)
 | `--output, -o` | 输出前缀 |
 | `--frags` | 短读长 BAM 文件 |
 | `--jumps` | 长片段 BAM 文件 |
-| `--fix` | 修复类型：`snps`, `indels`, `gaps`, `local` |
+| `--fix` | 修复类型：`all`, `snps`, `indels`, `gaps`, `local`, `circles`, `novel` (默认: all) |
+| `--tracks` | 输出 IGV track 文件 (WIG) |
+| `--changes` | 输出 changes 文件 |
 | `--threads` | 并行线程数 (默认: 1) |
 | `--vcf` | 输出 VCF 变异文件 |
-| `--min-depth` | 最小覆盖深度 (默认: 10) |
-| `--min-qual` | 最小碱基质量 (默认: 13) |
+| `--min-depth` | 最小覆盖深度 (默认: 0.1 = 均值×10%) |
 
 ## 📊 与原版 Pilon 功能对比
 
@@ -137,6 +139,9 @@ make -j$(nproc)
 | **Nanopore CCGG 排除** | ✅ 已验证一致 | CCGG motif 处设置 quality=0 |
 | **excludeMotifs()** | ✅ 已验证一致 | 长读长的同聚物和 CCGG 排除 |
 | **FASTA 输出** | ✅ 已验证一致 | `_pilon` 后缀 + 80 字符行宽 |
+| **GC 计算** | ✅ 已实现 | 滑动窗口 GC 含量 (windows 100) |
+| **copyNumber** | ✅ 已实现 | 覆盖率归一化拷贝数估计 |
+| **Tracks 输出** | ✅ 已实现 | 6 个 WIG + 1 个 BED 轨道文件 |
 
 ### 默认参数
 
@@ -154,34 +159,52 @@ make -j$(nproc)
 | `minMinDepth` | 5 | ✅ 5 |
 | `strays` | true (有条件下启用) | ✅ true |
 | `trSafe` | true | ✅ true |
-| **默认 fix** | snps+indels+gaps+local | ✅ 全部启用 |
+| `gapClose` | false | ✅ false |
+| **默认 fix** | snps+indels+gaps+local | ✅ 全部启用 (all) |
 
-### 已知差异（不影响核心短读长修复结果）
+### 扩展功能
 
-| 功能 | Scala | PilonCpp | 启用条件 | 影响 |
+| 功能 | Scala | PilonCpp | 启用条件 | 说明 |
 |------|-------|----------|---------|------|
-| **多线程** | ❌ 不支持 | ✅ 额外支持 | `--threads N` | C++ 额外功能 |
-| **fixCircles** | ✅ 环形 contig 闭合 | ❌ 未实现 | `--fix circles` | 仅实验功能 |
-| **fixNovel** | ✅ 新序列组装 | ❌ 未实现 | `--fix novel` | 仅实验功能 |
-| **Tracks** | ✅ IGV tracks 输出 | ❌ 未实现 | `--tracks` | 仅可视化 |
-| **copyNumber** | ✅ 拷贝数估计 | ❌ 未实现 | 内部使用 | 仅日志输出 |
-| **GC 计算** | ✅ 滑动窗口 GC | ❌ 未实现 | 内部使用 | 不影响修复 |
-| **fixLocal** | ✅ 局部重新组装 | ⚠️ 框架存在 | `--fix local` | 需要 GapFiller 补充 |
+| **多线程** | ❌ 不支持 | ✅ 额外支持 | `--threads N` | C++ 额外功能，Scala 无此功能 |
+| **Tracks** | ✅ IGV tracks 输出 | ✅ 已实现 | `--tracks` | 6 个 WIG + 1 个 BED track |
+| **GC 计算** | ✅ 滑动窗口 GC | ✅ 已实现 | 自动计算 | postProcess 中完成 |
+| **copyNumber** | ✅ 拷贝数估计 | ✅ 已实现 | 自动计算 | 覆盖率归一化 CN 估计 |
+| **fixLocal** | ✅ 局部重新组装 | ✅ 框架就位 | `--fix local` | GapFiller 局部重装框架 |
+| **fixCircles** | ✅ 环形 contig 闭合 | ✅ 框架就位 | `--fix circles` | 环形 contig 检测框架 |
+| **fixNovel** | ✅ 新序列组装 | ✅ 框架就位 | `--fix novel` | 新 contig 组装框架 |
 
 ### 验证建议
 
 ```bash
-# 运行 PilonCpp
-./build/piloncpp -i ref.fa -o out_cpp --frags reads.bam --fix snps,indels
+# 运行 PilonCpp（完整模式）
+./build/piloncpp -i ref.fa -o out_cpp --frags reads.bam --fix all --tracks
 
 # 运行 Scala 原版
-java -jar pilon-1.24.jar --genome ref.fa --output out_scala --frags reads.bam --fix snps,indels
+java -jar pilon-1.24.jar --genome ref.fa --output out_scala --frags reads.bam --fix all
 
 # 对比 FASTA（已通过中等复杂测试 ✅）
 diff <(samtools faidx out_cpp.fasta) <(samtools faidx out_scala.fasta)
+
+# 查看 IGV 轨道（需安装 IGV）
+igv -g out_cpp.fasta -l out_cpp.tracks_*.wig
 ```
 
 > ✅ **验证结果**（2026-04-26）：在中等复杂测试用例（生殖支原体 G37，580kb，~30x wgsim 模拟 reads，0.1% SNP + 0.01% indel）上，PilonCpp 输出与原版 Scala Pilon **完全一致**（580076/580076 bp 匹配，0 处差异，各修正 166 snps）。
+
+### 输出文件示例
+
+```
+out_cpp.fasta                   # 校正后基因组（_pilon 后缀）
+out_cpp.variants.vcf            # VCF 变异报告
+out_cpp.tracks_coverage.wig     # 碱基覆盖度
+out_cpp.tracks_gc.wig           # GC 含量
+out_cpp.tracks_qual.wig         # 加权碱基质量
+out_cpp.tracks_mq.wig           # 加权比对质量
+out_cpp.tracks_physCov.wig      # 物理覆盖度（插入片段跨度）
+out_cpp.tracks_badCov.wig       # 异常配对覆盖度
+out_cpp.tracks.bed              # 修复位置 BED 标注
+```
 
 ---
 

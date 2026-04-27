@@ -127,6 +127,20 @@ int main(int argc, char* argv[]) {
         // Free memory already done in processRegions
     }
 
+    // --tracks: Output IGV track files
+    if (Pilon::tracks) {
+        std::string trackPrefix = Pilon::outputFile("tracks");
+        std::cout << "Writing tracks: " << trackPrefix << "_*.wig" << std::endl;
+        for (auto& region : genome.getProcessedRegions()) {
+            region.writeTracks(trackPrefix);
+        }
+    }
+
+    // fixNovel: assemble novel contigs from unmapped reads
+    if (Pilon::fixNovel) {
+        GapFiller::fixNovel(&genome, Pilon::bamFiles);
+    }
+
     // Output polished genome
     std::string outputPath = Pilon::outputFile("fasta");
     std::cout << "\nWriting polished genome: " << outputPath << std::endl;

@@ -26,7 +26,7 @@
 namespace pilon {
 
 // Static member initialization
-const std::unordered_set<std::string> Pilon::fixChoices = {"snps", "indels", "gaps", "local"};
+const std::unordered_set<std::string> Pilon::fixChoices = {"all", "snps", "indels", "gaps", "local"};
 const std::unordered_set<std::string> Pilon::experimentalFixChoices = {"amb", "breaks", "circles", "novel", "scaffolds"};
 
 bool Pilon::fixSnps = true;
@@ -88,7 +88,12 @@ void Pilon::parseFixList(const std::string& fix) {
         std::string trimmed = Utils::trim(f);
         if (fixChoices.count(trimmed)) {
             fixList.insert(trimmed);
-            if (trimmed == "snps") fixSnps = true;
+            if (trimmed == "all" || trimmed == "everything") {
+                fixSnps = true;
+                fixIndels = true;
+                fixGaps = true;
+                fixLocal = true;
+            } else if (trimmed == "snps") fixSnps = true;
             else if (trimmed == "indels") fixIndels = true;
             else if (trimmed == "gaps") fixGaps = true;
             else if (trimmed == "local") fixLocal = true;

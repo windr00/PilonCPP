@@ -24,6 +24,7 @@
 #include <unordered_map>
 #include <sstream>
 #include <cstdint>
+#include <functional>
 #include "pileup.h"
 
 namespace pilon {
@@ -108,6 +109,12 @@ struct GenomeRegion {
     std::vector<int> fragCoverage_arr;
     std::vector<int8_t> weightedQual_arr;
     std::vector<int8_t> weightedMq_arr;
+    std::vector<double> copyNumber_arr;   // copy number estimate
+    std::vector<int8_t> gc_arr;           // GC content (0-100)
+
+    // GC sliding window buffer
+    std::vector<int8_t> gcBuffer;
+    int gcCount;
 
     GenomeRegion(const std::string& name, int start, int stop,
                  const std::string& bases, double minDepth);
@@ -136,6 +143,29 @@ struct GenomeRegion {
     // Post-processing
     void computePhysCov();
     void postProcess();
+    void computeGc(int window = 100);
+    void computeCopyNumber();
+
+    // Track-style output (matching Scala Tracks)
+    void writeWiggle(FILE* writer, const std::string& name, const std::string& desc,
+                     std::function<int(int)> valueFn, const std::string& extraOpts = "") const;
+    void writeBed(FILE* writer, const std::string& name,
+                  std::function<bool(int)> selectFn) const;
+    void writeTracks(const std::string& prefix) const;
+
+    // Accessors for tracks
+    int cov(int i) const { return i >= 0 && i < (int)coverage_arr.size() ? coverage_arr[i] : 0; }
+    int badCov(int i) const { return i >= 0 && i < (int)badCoverage_arr.size() ? badCoverage_arr[i] : 0; }
+    int physCov(int i) const { return i >= 0 && i < (int)physCoverage_arr.size() ? physCoverage_arr[i] : 0; }
+    int clip(int i) const { return i >= 0 && i < (int)clips_arr.size() ? clips_arr[i] : 0; }
+    int insSize(int i) const { return i >= 0 && i < (int)insertSize_arr.size() ? insertSize_arr[i] : 0; }
+    int fragCov(int i) const { return i >= 0 && i < (int)fragCoverage_arr.size() ? fragCoverage_arr[i] : 0; }
+    int8_t wQual(int i) const { return i >= 0 && i < (int)weightedQual_arr.size() ? weightedQual_arr[i] : 0; }
+    int8_t wMq(int i) const { return i >= 0 && i < (int)weightedMq_arr.size() ? weightedMq_arr[i] : 0; }
+    double copyNum(int i) const { return i >= 0 && i < (int)copyNumber_arr.size() ? copyNumber_arr[i] : 0.0; }
+    int8_t gc(int i) const { return i >= 0 && i < (int)gc_arr.size() ? gc_arr[i] : 0; }
+    bool isChanged(int i) const { return i >= 0 && i < (int)changed.size() ? changed[i] : false; }
+    bool isAmbiguous(int i) const { return i >= 0 && i < (int)ambiguous.size() ? ambiguous[i] : false; }
 
     // Core fixing logic
     void identifyAndFixIssues();

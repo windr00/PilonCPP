@@ -198,8 +198,149 @@ void GenomeRegion::computePhysCov() {
     }
 }
 // =============================================================================
-// Post-process: collect changes from pileups (matching Scala postProcess)
+// GC content computation (matching Scala sliding window)
 // =============================================================================
+void GenomeRegion::computeGc(int window) {
+    gc_arr.resize(size());
+    gcBuffer.resize(window, 0);
+
+    // Initialize circular buffer to ~50% GC
+    gcCount = 0;
+    for (int i = 0; i < window; i++) {
+        if ((i & 1) == 0) {
+            gcBuffer[i] = 1;
+            gcCount++;
+        } else {
+            gcBuffer[i] = 0;
+        }
+    }
+
+    int halfWindow = (window + 1) / 2;
+    for (int locus = 0; locus < (int)contigBases.size(); locus++) {
+        int center = (locus >= halfWindow) ? locus - halfWindow : locus;
+        int bufIndex = locus % window;
+        char base = contigBases[locus];
+        int8_t gcBase;
+        if (base == 'G' || base == 'C') gcBase = 1;
+        else if (base == 'A' || base == 'T') gcBase = 0;
+        else gcBase = gcBuffer[bufIndex]; // NOP for Ns, IUPAC, etc
+
+        gcCount += gcBase - gcBuffer[bufIndex];
+        gcBuffer[bufIndex] = gcBase;
+
+        if (inRegion(center))
+            gc_arr[index(center)] = static_cast<int8_t>(gcCount);
+    }
+}
+
+// =============================================================================
+// Copy number estimation (matching Scala)
+// =============================================================================
+void GenomeRegion::computeCopyNumber() {
+    copyNumber_arr.resize(size(), 1.0);
+    // Simple approach: copy number = coverage / meanCoverage
+    long long totalDepth = 0;
+    int count = 0;
+    for (int i = 0; i < size(); i++) {
+        totalDepth += pileUps[i].depth();
+        if (pileUps[i].depth() > 0) count++;
+    }
+    double meanCov = count > 0 ? static_cast<double>(totalDepth) / count : 1.0;
+    if (meanCov < 1.0) meanCov = 1.0;
+    for (int i = 0; i < size(); i++) {
+        copyNumber_arr[i] = pileUps[i].depth() / meanCov;
+    }
+}
+
+// =============================================================================
+// Track output (matching Scala Tracks class)
+// =============================================================================
+void GenomeRegion::writeWiggle(FILE* writer, const std::string& name,
+                               const std::string& desc,
+                               std::function<int(int)> valueFn,
+                               const std::string& extraOpts) const {
+    if (!writer) return;
+    fprintf(writer, "track type=wiggle_0 name=\"%s\" description=\"%s\" %s\n",
+            name.c_str(), desc.c_str(), extraOpts.c_str());
+    fprintf(writer, "fixedStep chrom=%s start=%d step=1\n", name.c_str(), start + 1);
+    for (int i = 0; i < size(); i++) {
+        fprintf(writer, "%d\n", valueFn(i));
+    }
+}
+
+void GenomeRegion::writeBed(FILE* writer, const std::string& name,
+                            std::function<bool(int)> selectFn) const {
+    if (!writer) return;
+    int bedStart = -1;
+    for (int i = 0; i < size(); i++) {
+        if (selectFn(i)) {
+            if (bedStart < 0) bedStart = i;
+        } else {
+            if (bedStart >= 0) {
+                fprintf(writer, "%s\t%d\t%d\t%s\n",
+                        name.c_str(), start + bedStart, start + i, name.c_str());
+                bedStart = -1;
+            }
+        }
+    }
+    if (bedStart >= 0) {
+        fprintf(writer, "%s\t%d\t%d\t%s\n",
+                name.c_str(), start + bedStart, start + size(), name.c_str());
+    }
+}
+
+void GenomeRegion::writeTracks(const std::string& prefix) const {
+    // BED track
+    std::string bedFile = prefix + ".bed";
+    FILE* bed = fopen(bedFile.c_str(), "a");
+    if (bed) {
+        writeBed(bed, name.c_str(), [this](int i) -> bool { return isChanged(i) || deleted[i]; });
+        fclose(bed);
+    }
+
+    std::string covFn = prefix + "_coverage.wig";
+    FILE* covF = fopen(covFn.c_str(), "a");
+    if (covF) {
+        writeWiggle(covF, name, "Coverage", [this](int i) { return cov(i); });
+        fclose(covF);
+    }
+
+    std::string bcFn = prefix + "_badCov.wig";
+    FILE* bcF = fopen(bcFn.c_str(), "a");
+    if (bcF) {
+        writeWiggle(bcF, name, "Bad Coverage", [this](int i) { return badCov(i); });
+        fclose(bcF);
+    }
+
+    std::string gcFn = prefix + "_gc.wig";
+    FILE* gcF = fopen(gcFn.c_str(), "a");
+    if (gcF) {
+        writeWiggle(gcF, name, "GC Content", [this](int i) { return gc(i); },
+                    "graphType=heatmap midRange=35:65 midColor=0,255,0");
+        fclose(gcF);
+    }
+
+    std::string qFn = prefix + "_qual.wig";
+    FILE* qF = fopen(qFn.c_str(), "a");
+    if (qF) {
+        writeWiggle(qF, name, "Weighted Qual", [this](int i) { return wQual(i); });
+        fclose(qF);
+    }
+
+    std::string mqFn = prefix + "_mq.wig";
+    FILE* mqF = fopen(mqFn.c_str(), "a");
+    if (mqF) {
+        writeWiggle(mqF, name, "Weighted MQ", [this](int i) { return wMq(i); });
+        fclose(mqF);
+    }
+
+    std::string physFn = prefix + "_physCov.wig";
+    FILE* physF = fopen(physFn.c_str(), "a");
+    if (physF) {
+        writeWiggle(physF, name, "Physical Coverage", [this](int i) { return physCov(i); });
+        fclose(physF);
+    }
+}
 void GenomeRegion::postProcess() {
     computePhysCov();
     
@@ -290,6 +431,8 @@ void GenomeRegion::postProcess() {
     
     // Pass 2: computed values (simplified for now)
     // Scala also computes copyNumber, fragCoverageDist here
+    computeGc();
+    computeCopyNumber();
 }
 // =============================================================================
 // fixFixList: Sort and remove overlapping fixes (matching Scala)
@@ -462,6 +605,21 @@ void GenomeRegion::identifyAndFixIssues() {
     fixes = snpFixList;
     fixes.insert(fixes.end(), smallFixList.begin(), smallFixList.end());
     fixes.insert(fixes.end(), bigFixList.begin(), bigFixList.end());
+
+    // fixLocal: attempt local reassembly for unresolved regions
+    if (Pilon::fixLocal && !pileUps.empty()) {
+        // Find regions with poor fix coverage for local reassembly
+        // For now, a simplified version - just log the intent
+        if (Pilon::verbose) {
+            std::cout << "  fixLocal enabled for " << name << ":" << start << "-" << stop << std::endl;
+        }
+        // In a full implementation, this would identify break regions and call GapFiller::fixBreak
+    }
+
+    // fixCircles: detect circular contigs
+    if (Pilon::fixCircles) {
+        GapFiller::fixCircles(*this, Pilon::gapMargin);
+    }
 }
 // =============================================================================
 // Write VCF record

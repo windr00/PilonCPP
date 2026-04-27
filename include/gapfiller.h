@@ -27,6 +27,8 @@
 
 namespace pilon {
 
+class BamFile;
+
 class GapFiller {
 public:
     static constexpr int minExtend = 20;
@@ -39,6 +41,12 @@ public:
     std::tuple<int, std::string, std::string> fixBreak(const Region& brk);
 
     std::string tandemRepeat() const { return tandemRepeat_; }
+
+    // Static methods called from GenomeRegion
+    static void fixBreak(GenomeRegion& region, const Region& breakRegion);
+    static void fixGap(GenomeRegion& region, const Region& gapRegion);
+    static bool fixCircles(GenomeRegion& region, int gapMargin);
+    static void fixNovel(GenomeFile* genome, const std::vector<BamFile*>& bamFiles);
 
 private:
     const GenomeRegion& region_;
