@@ -654,6 +654,30 @@ std::vector<BamRead> BamFile::recruitFlankReads(const Region& region) const {
     return reads;
 }
 
+// Get unmapped reads for novel contig assembly
+std::vector<BamRead> BamFile::getUnalignedReads() const {
+    std::vector<BamRead> results;
+    htsFile* fp = hts_open(path_.c_str(), "r");
+    if (!fp) return results;
+    bam_hdr_t* hdr = sam_hdr_read(fp);
+    if (!hdr) { hts_close(fp); return results; }
+
+    bam1_t* bam = bam_init1();
+    int ret;
+    while ((ret = sam_read1(fp, hdr, bam)) > 0) {
+        if (!Pilon::nonPf && (bam->core.flag & BAM_FQCFAIL)) continue;
+        if (!Pilon::duplicates && (bam->core.flag & BAM_FDUP)) continue;
+        if (bam->core.flag & BAM_FSECONDARY) continue;
+        if (bam->core.flag & BAM_FUNMAP) {
+            results.push_back(bamToRead(bam, hdr));
+        }
+    }
+    bam_destroy1(bam);
+    bam_hdr_destroy(hdr);
+    hts_close(fp);
+    return results;
+}
+
 double BamFile::insertSizeMean() const {
     return pctFR() >= 50 ? insertStatsFR_.mean() : insertStatsRF_.mean();
 }

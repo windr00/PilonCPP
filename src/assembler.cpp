@@ -370,14 +370,18 @@ std::vector<std::string> Assembler::novel(Assembler& ref) {
     if (Pilon::verbose) {
         std::cout << "Assembling novel sequence" << std::endl;
     }
-    
+
     prunePileups();
+    // Save k-mer list before building graph (buildGraph clears pileups)
+    std::vector<std::string> kmers;
+    for (const auto& kv : pileups) kmers.push_back(kv.first);
+    if (kGraph.empty()) buildGraph();
+
     std::unordered_set<std::string> usedKmers;
     std::vector<std::string> paths;
     int n = 0;
 
-    for (const auto& kv : pileups) {
-        const std::string& kmer = kv.first;
+    for (const auto& kmer : kmers) {
         if (usedKmers.find(kmer) != usedKmers.end()) continue;
         
         auto forwards = pathsForward(kmer);

@@ -18,6 +18,7 @@
 #include "genome.h"
 #include "utils.h"
 #include "pilon.h"
+#include "gapfiller.h"
 #include "bamfile.h"
 #include "gapfiller.h"
 #include <fstream>
@@ -331,16 +332,47 @@ void GenomeRegion::writeTracks(const std::string& prefix) const {
     FILE* mqF = fopen(mqFn.c_str(), "a");
     if (mqF) {
         writeWiggle(mqF, name, "Weighted MQ", [this](int i) { return wMq(i); });
-        fclose(mqF);
+            fclose(mqF);
+        }
+
+        std::string physFn = prefix + "_physCov.wig";
+        FILE* physF = fopen(physFn.c_str(), "a");
+        if (physF) {
+            writeWiggle(physF, name, "Physical Coverage", [this](int i) { return physCov(i); });
+            fclose(physF);
+        }
     }
 
-    std::string physFn = prefix + "_physCov.wig";
-    FILE* physF = fopen(physFn.c_str(), "a");
-    if (physF) {
-        writeWiggle(physF, name, "Physical Coverage", [this](int i) { return physCov(i); });
-        fclose(physF);
+    // =============================================================================
+    // fixBreakRegion: apply a local assembly patch to the contig bases
+    // =============================================================================
+    void GenomeRegion::fixBreakRegion(const Region& breakRegion, const std::string& patch) {
+        int startPos = start + breakRegion.start;
+        int endPos = start + breakRegion.stop;
+
+        if (Pilon::verbose) {
+            std::cout << "    fixing break " << breakRegion.start << "-" << breakRegion.stop
+                      << " patch_len=" << patch.length() << std::endl;
+        }
+
+        if (startPos > (int)contigBases.size()) return;
+
+        std::string newBases;
+        newBases.append(contigBases.substr(0, startPos));
+        newBases.append(patch);
+        int afterBreak = startPos + (breakRegion.stop - breakRegion.start);
+        if (afterBreak < (int)contigBases.size())
+            newBases.append(contigBases.substr(afterBreak));
+
+        contigBases = std::move(newBases);
+
+        // Also update bases for output (FASTA writes from bases)
+        // Rebuild bases from the new contigBases
+        bases = contigBases;
+
+        if (Pilon::verbose)
+            std::cout << "    break fixed, new length: " << contigBases.size() << std::endl;
     }
-}
 void GenomeRegion::postProcess() {
     computePhysCov();
     
@@ -608,12 +640,22 @@ void GenomeRegion::identifyAndFixIssues() {
 
     // fixLocal: attempt local reassembly for unresolved regions
     if (Pilon::fixLocal && !pileUps.empty()) {
-        // Find regions with poor fix coverage for local reassembly
-        // For now, a simplified version - just log the intent
         if (Pilon::verbose) {
-            std::cout << "  fixLocal enabled for " << name << ":" << start << "-" << stop << std::endl;
+            std::cout << "  fixLocal for " << name << ":" << start << "-" << stop << std::endl;
         }
-        // In a full implementation, this would identify break regions and call GapFiller::fixBreak
+        // Find break regions: gaps in the contig or regions with poor consensus
+        for (int i = 0; i < size(); i++) {
+            if (contigBases[i] == 'N') {
+                // Found a gap - extend it
+                int gapStart = i;
+                while (i < size() && contigBases[i] == 'N') i++;
+                int gapEnd = i;
+                if (gapEnd > gapStart) {
+                    Region gap(name, gapStart, gapEnd);
+                    GapFiller::fixBreak(*this, gap);
+                }
+            }
+        }
     }
 
     // fixCircles: detect circular contigs

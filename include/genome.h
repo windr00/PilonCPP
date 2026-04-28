@@ -169,6 +169,7 @@ struct GenomeRegion {
 
     // Core fixing logic
     void identifyAndFixIssues();
+    void fixBreakRegion(const Region& breakRegion, const std::string& patch);
 
     // Write methods
     void writeVcf(FILE* writer) const;

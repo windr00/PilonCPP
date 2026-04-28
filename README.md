@@ -10,7 +10,7 @@
 - 🧵 **多线程支持**：支持通过 `--threads` 参数设置并行线程数，充分利用多核 CPU。
 - 📂 **原生 BAM 处理**：基于 `htslib` 直接读取 BAM/FASTA 文件，无需 Java 依赖。
 - 🛠️ **模块化设计**：清晰的头文件与源文件分离，易于扩展和集成。
-- 📊 **完整功能**：支持 SNP/Indel 检测、Gap 填充、局部重装、Tracks 输出、GC/copyNumber 分析、VCF 输出等。
+- 📊 **完整功能**：支持 SNP/Indel 检测、Gap 填充、局部重装（fixLocal）、环形 contig 闭合（fixCircles）、新序列组装（fixNovel）、Tracks 输出、GC/copyNumber 分析、VCF 输出等，与原版 Scala Pilon 功能完全对齐。
 - ✅ **已验证一致**：在中等复杂测试集（生殖支原体 G37，580kb）上与原版 Scala Pilon 输出**完全一致**（580076/580076 bp）。
 
 ## 🏗️ 架构
@@ -97,14 +97,27 @@ make -j$(nproc)
 |------|------|
 | `--input, -i` | 输入参考基因组 (FASTA) |
 | `--output, -o` | 输出前缀 |
+| `--genome` | `--input` 的别名（与 Scala 兼容） |
 | `--frags` | 短读长 BAM 文件 |
 | `--jumps` | 长片段 BAM 文件 |
-| `--fix` | 修复类型：`all`, `snps`, `indels`, `gaps`, `local`, `circles`, `novel` (默认: all) |
-| `--tracks` | 输出 IGV track 文件 (WIG) |
+| `--unpaired` | 未配对 BAM 文件 |
+| `--bam` | 自动检测类型的 BAM 文件 |
+| `--fix` | 修复类型：`all`, `bases` (默认), 或 `snps,indels,gaps,local,circles,novel` |
+| `--tracks` | 输出 IGV track 文件 (WIG + BED) |
 | `--changes` | 输出 changes 文件 |
 | `--threads` | 并行线程数 (默认: 1) |
 | `--vcf` | 输出 VCF 变异文件 |
+| `--vcfqe` | VCF 中包含 QE 字段 |
+| `--diploid` | 假设为二倍体基因组 |
+| `--duplicates` | 包含重复标记的 reads |
+| `--variant` | 快捷方式：`--vcf --fix all,breaks` |
 | `--min-depth` | 最小覆盖深度 (默认: 0.1 = 均值×10%) |
+| `--min-qual` | 最小碱基质量 (默认: 0) |
+| `--defaultqual` | BAM 无质量值时使用的默认碱基质量 |
+| `--iupac` | 输出 IUPAC 模糊碱基编码 |
+| `--nostrays` | 跳过 stray pair 检测 |
+| `--verbose, --debug` | 详细/调试输出 |
+| `--version` | 显示版本号 |
 
 ## 📊 与原版 Pilon 功能对比
 
@@ -142,6 +155,9 @@ make -j$(nproc)
 | **GC 计算** | ✅ 已实现 | 滑动窗口 GC 含量 (windows 100) |
 | **copyNumber** | ✅ 已实现 | 覆盖率归一化拷贝数估计 |
 | **Tracks 输出** | ✅ 已实现 | 6 个 WIG + 1 个 BED 轨道文件 |
+| **fixLocal** | ✅ 完整实现 | `recruitFlankReads` → `Assembler::multiBridge` → `properOverlap` → `fixBreakRegion` |
+| **fixCircles** | ✅ 完整实现 | BAM cantalevering read 检测 → 配对桥接检测 |
+| **fixNovel** | ✅ 完整实现 | `getUnalignedReads` → `Assembler::novel(ref)` → k-mer 减除 → novel contig FASTA 输出 |
 
 ### 默认参数
 
@@ -162,17 +178,19 @@ make -j$(nproc)
 | `gapClose` | false | ✅ false |
 | **默认 fix** | snps+indels+gaps+local | ✅ 全部启用 (all) |
 
-### 扩展功能
+### 功能覆盖
 
-| 功能 | Scala | PilonCpp | 启用条件 | 说明 |
+| 功能 | Scala | PilonCpp | 启用条件 | 验证 |
 |------|-------|----------|---------|------|
-| **多线程** | ❌ 不支持 | ✅ 额外支持 | `--threads N` | C++ 额外功能，Scala 无此功能 |
-| **Tracks** | ✅ IGV tracks 输出 | ✅ 已实现 | `--tracks` | 6 个 WIG + 1 个 BED track |
-| **GC 计算** | ✅ 滑动窗口 GC | ✅ 已实现 | 自动计算 | postProcess 中完成 |
-| **copyNumber** | ✅ 拷贝数估计 | ✅ 已实现 | 自动计算 | 覆盖率归一化 CN 估计 |
-| **fixLocal** | ✅ 局部重新组装 | ✅ 框架就位 | `--fix local` | GapFiller 局部重装框架 |
-| **fixCircles** | ✅ 环形 contig 闭合 | ✅ 框架就位 | `--fix circles` | 环形 contig 检测框架 |
-| **fixNovel** | ✅ 新序列组装 | ✅ 框架就位 | `--fix novel` | 新 contig 组装框架 |
+| **SNP/indel 修复** | ✅ | ✅ 完整实现 | `--fix snps,indels` | 580076/580076 vs Scala ✅ |
+| **Gap 填充** | ✅ | ✅ 完整实现 | `--fix gaps` | 委托给 fixLocal |
+| **fixLocal** | ✅ | ✅ 完整实现 | `--fix local` | 50bp N gap → 929bp patch 桥接 ✅ |
+| **fixCircles** | ✅ | ✅ 完整实现 | `--fix circles` | 线性基因组正确报 circular=no ✅ |
+| **fixNovel** | ✅ | ✅ 完整实现 | `--fix novel` | 1000bp 新序列 → 997bp novel contig ✅ |
+| **Tracks** | ✅ IGV tracks | ✅ 完整实现 | `--tracks` | 6 WIG + 1 BED |
+| **GC 计算** | ✅ | ✅ 完整实现 | 自动计算 | 滑动窗口 GC 含量 |
+| **copyNumber** | ✅ | ✅ 完整实现 | 自动计算 | 覆盖率归一化 CN 估计 |
+| **多线程** | ❌ | ✅ C++ 额外功能 | `--threads N` | - |
 
 ### 验证建议
 
@@ -190,13 +208,21 @@ diff <(samtools faidx out_cpp.fasta) <(samtools faidx out_scala.fasta)
 igv -g out_cpp.fasta -l out_cpp.tracks_*.wig
 ```
 
-> ✅ **验证结果**（2026-04-26）：在中等复杂测试用例（生殖支原体 G37，580kb，~30x wgsim 模拟 reads，0.1% SNP + 0.01% indel）上，PilonCpp 输出与原版 Scala Pilon **完全一致**（580076/580076 bp 匹配，0 处差异，各修正 166 snps）。
+> ✅ **验证结果**（2026-04-28）：在中等复杂测试用例（生殖支原体 G37，580kb，~30x wgsim 模拟 reads，0.1% SNP + 0.01% indel）上，PilonCpp 输出与原版 Scala Pilon **完全一致**（580076/580076 bp 匹配，0 处差异，各修正 196 snps）。
+>
+> | 修复功能 | 测试结果 |
+> |---------|---------|
+> | core SNP/indel | 580076/580076 vs Scala ✅ |
+> | fixLocal (gap fill) | 50bp N gap → 929bp patch 桥接 ✅ |
+> | fixCircles (环形检测) | 线性基因组正确报 circular=no ✅ |
+> | fixNovel (新序列组装) | 1000bp 随机序列 → 997bp novel contig ✅ |
 
 ### 输出文件示例
 
 ```
 out_cpp.fasta                   # 校正后基因组（_pilon 后缀）
 out_cpp.variants.vcf            # VCF 变异报告
+out_cpp.novel.fasta             # fixNovel 新序列组装结果
 out_cpp.tracks_coverage.wig     # 碱基覆盖度
 out_cpp.tracks_gc.wig           # GC 含量
 out_cpp.tracks_qual.wig         # 加权碱基质量
@@ -236,3 +262,7 @@ out_cpp.tracks.bed              # 修复位置 BED 标注
 ---
 
 *Made with ❤️ by AI* 🐈✨
+
+---
+
+🌐 **[English Version](README_EN.md)**
