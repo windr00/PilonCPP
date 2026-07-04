@@ -19,6 +19,7 @@
 #ifndef PILON_ASSEMBLER_H
 #define PILON_ASSEMBLER_H
 
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <unordered_map>

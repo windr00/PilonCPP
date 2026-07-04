@@ -170,19 +170,35 @@ PileUp::BaseCall::BaseCall(const PileUp& pu)
     homo = homoScore >= heteroScore;
     score = pu.mqSum > 0 ? std::abs(homoScore - heteroScore) * n / pu.mqSum : 0;
 
-    auto [ins, homoIns] = doHetIndelCall(pu.insertionList, pu.insPct(), pu.depth());
-    if (!ins.empty()) {
-        insertion = ins;
+    // Scala insertCall: insertions > 2 && insertions > deletions
+    std::string insert_call;
+    bool homoIns = true;
+    if (pu.insertions > 2 && pu.insertions > pu.deletions) {
+        auto [ins, homo] = doHetIndelCall(pu.insertionList, pu.insPct(), pu.depth());
+        insert_call = ins;
+        homoIns = homo;
+    }
+
+    if (!insert_call.empty()) {
+        insertion = insert_call;
         deletion = "";
         indel = true;
         homoIndel = homoIns;
     } else {
-        auto [del, homoDel] = doHetIndelCall(pu.deletionList, pu.delPct(), pu.depth());
-        if (!del.empty()) {
-            insertion = "";
-            deletion = del;
-            indel = true;
-            homoIndel = homoDel;
+        // Scala deletionCall: deletions > 2 && deletions > insertions
+        if (pu.deletions > 2 && pu.deletions > pu.insertions) {
+            auto [del, homoDel] = doHetIndelCall(pu.deletionList, pu.delPct(), pu.depth());
+            if (!del.empty()) {
+                insertion = "";
+                deletion = del;
+                indel = true;
+                homoIndel = homoDel;
+            } else {
+                insertion = "";
+                deletion = "";
+                indel = false;
+                homoIndel = true;
+            }
         } else {
             insertion = "";
             deletion = "";

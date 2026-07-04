@@ -25,7 +25,9 @@
 #include <sstream>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include "pileup.h"
+#include "normal.h"
 
 namespace pilon {
 
@@ -116,6 +118,17 @@ struct GenomeRegion {
     std::vector<int8_t> gcBuffer;
     int gcCount;
 
+    // Normal distribution objects (matching Scala lazy vals)
+    std::unique_ptr<NormalDistribution> physCoverageDist;
+    std::unique_ptr<NormalDistribution> coverageDist;
+    std::unique_ptr<NormalDistribution> fragCoverageDist;
+    std::unique_ptr<NormalDistribution> badCoverageDist;
+    std::unique_ptr<NormalDistribution> insertSizeDist;
+    std::unique_ptr<NormalDistribution> weightedMqDist;
+
+    // pctBadOverall (matching Scala lazy val)
+    int pctBadOverall_;
+
     GenomeRegion(const std::string& name, int start, int stop,
                  const std::string& bases, double minDepth);
 
@@ -170,6 +183,22 @@ struct GenomeRegion {
     // Core fixing logic
     void identifyAndFixIssues();
     void fixBreakRegion(const Region& breakRegion, const std::string& patch);
+
+    // Break detection helpers (matching Scala)
+    int pctBadOverall() const;
+    bool lowCoverage(int i) const;
+    bool highClipping(int i) const;
+    bool tooBad(int i) const;
+    double dipFraction(int i) const;
+    double dipCoverage(int i, int radius = 100) const;
+    int delta(int i, const std::vector<int>& values, int radius = 100) const;
+    int deltaCoverage(int i, int radius = 100) const;
+    double deltaFraction(int i) const;
+    bool breakp(int i) const;
+    bool nearEdge(const Region& r, int radius = 100) const;
+    bool nearAny(const std::vector<Region>& regions, int distance = 100) const;
+    std::vector<Region> summaryRegions(std::function<bool(int)> positionTest, int slop = 100) const;
+    std::vector<Region> gaps() const;
 
     // Write methods
     void writeVcf(FILE* writer) const;

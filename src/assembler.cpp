@@ -19,6 +19,7 @@
 #include "assembler.h"
 #include "bases.h"
 #include "pilon.h"
+#include "utils.h"
 #include <algorithm>
 #include <iostream>
 #include <sstream>
@@ -180,12 +181,17 @@ void Assembler::prunePileups(int minCount) {
 
 std::string Assembler::kmerPathString(const std::vector<std::string>& kmers, bool prependLength) {
     if (kmers.empty()) return "";
-    
-    std::string pathStr = kmers.front();
-    for (size_t i = 1; i < kmers.size(); i++) {
-        pathStr += kmers[i].back();
+
+    // Scala: val path = kmers.reverse
+    // kmerPathsForward builds kmers newest-first; reverse to get correct base order
+    std::vector<std::string> reversed = kmers;
+    std::reverse(reversed.begin(), reversed.end());
+
+    std::string pathStr = reversed.front();
+    for (size_t i = 1; i < reversed.size(); i++) {
+        pathStr += reversed[i].back();
     }
-    
+
     if (prependLength) {
         return "(" + std::to_string(pathStr.length()) + ")" + pathStr;
     }
@@ -283,7 +289,8 @@ std::vector<std::string> Assembler::pathsForward(const std::string& startingKmer
     for (const auto& kp : kmerPaths) {
         paths.push_back(kmerPathString(kp));
     }
-    std::sort(paths.begin(), paths.end(), 
+    // Scala: sortWith((a,b) => a.length > b.length) is stable
+    std::stable_sort(paths.begin(), paths.end(),
               [](const std::string& a, const std::string& b) { return a.length() > b.length(); });
     
     if (Pilon::debug) {
@@ -318,7 +325,8 @@ std::vector<std::string> Assembler::tryForward(const std::string& anchor) {
         if (!paths.empty() && paths[0].length() > anchor.length() + minExtend) {
             return paths;
         } else {
-            auto subPaths = tryForward(anchor.substr(1));
+            // Scala: tryForward(anchor.substring(K)) — removes first K chars
+            auto subPaths = tryForward(anchor.substr(K));
             for (auto& p : subPaths) {
                 p = startingKmer + p;
             }
@@ -411,7 +419,7 @@ std::vector<std::string> Assembler::novel(Assembler& ref) {
     for (const auto& path : paths) {
         int kLength = static_cast<int>(path.length()) - (K - 1);
         int novel = novelKmers(path);
-        int novelPct = kLength > 0 ? (novel * 100) / kLength : 0;
+        int novelPct = kLength > 0 ? Utils::pct(static_cast<long long>(novel), static_cast<long long>(kLength)) : 0;
         
         if (novel >= minNovel && novelPct >= minNovelPct) {
             ref.addGraphSeq(path);

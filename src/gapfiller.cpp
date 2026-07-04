@@ -2,18 +2,6 @@
  * Copyright (c) 2012-2018 Broad Institute, Inc.
  *
  * This file is part of PilonCpp.
- *
- * PilonCpp is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2
- * as published by the Free Software Foundation.
- *
- * PilonCpp is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with PilonCpp.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include "gapfiller.h"
@@ -31,6 +19,9 @@
 namespace pilon {
 
 int GapFiller::k = 0;
+const std::tuple<int, std::string, std::string> GapFiller::noSolution = {0, "", ""};
+
+GapFiller::GapFiller(GenomeRegion& region) : region_(region) {}
 
 static bool substrEq(const std::string& a, int aOff, const std::string& b, int bOff, int len) {
     if (aOff + len > (int)a.length() || bOff + len > (int)b.length()) return false;
@@ -39,309 +30,488 @@ static bool substrEq(const std::string& a, int aOff, const std::string& b, int b
     return true;
 }
 
-static std::string findProperOverlap(const std::string& left, const std::string& right, int minOverlap) {
+// =====================================================================
+// properOverlap — matches Scala exactly
+// =====================================================================
+std::string GapFiller::properOverlap(const std::string& left, const std::string& right, int minOverlap) {
     int ll = (int)left.length();
     int rl = (int)right.length();
-    if (ll < minOverlap || rl < minOverlap) return "";
-    int maxOverlap = std::min(ll, rl);
-    for (int overlap = minOverlap; overlap <= maxOverlap; overlap++)
-        if (substrEq(left, ll - overlap, right, 0, overlap))
-            return left + right.substr(overlap);
+    for (int overlap = minOverlap; overlap <= ll + rl - 2 * minOverlap; overlap++) {
+        int leftOffset = std::max(ll - overlap, 0);
+        int rightOffset = std::max(overlap - ll, 0);
+        int len = std::min(ll - leftOffset, rl - rightOffset);
+        if (substrEq(left, leftOffset, right, rightOffset, len)) {
+            return left.substr(0, leftOffset) + right.substr(rightOffset);
+        }
+    }
     return "";
 }
 
-void GapFiller::fixBreak(GenomeRegion& region, const Region& breakRegion) {
-    if (Pilon::verbose)
-        std::cout << "  fixBreak at " << breakRegion.toString() << std::endl;
+// =====================================================================
+// trimPatch — matches Scala exactly
+// =====================================================================
+std::tuple<int, std::string, std::string>
+GapFiller::trimPatch(int startArg, const std::string& patchArg, int stopArg) {
+    int start = startArg;
+    int stop  = stopArg;
+    std::string patch = patchArg;
 
-    int minRadius = 3 * Assembler::K;
-    int radius = minRadius;
+    while (start < stop && !patch.empty() &&
+           (region_.baseAt(start) == patch[0] || region_.originalBaseAt(start) == patch[0])) {
+        start++;
+        patch = patch.substr(1);
+    }
+    while (start < stop && !patch.empty() &&
+           (region_.baseAt(stop - 1) == patch.back() ||
+            region_.originalBaseAt(stop - 1) == patch.back())) {
+        stop--;
+        patch = patch.substr(0, patch.length() - 1);
+    }
 
-    int start = std::max(breakRegion.start - radius, 0);
-    int stop = std::min(breakRegion.stop + radius, region.size());
-    if (start >= stop) return;
+    // Build reference string for this range
+    int refLen = stop - start;
+    std::string ref(refLen, 'N');
+    for (int i = 0; i < refLen; i++) {
+        ref[i] = region_.baseAt(start + i);
+    }
+    return {start, ref, patch};
+}
 
-    std::string leftFlank = region.subString(start, breakRegion.start - start);
-    std::string rightFlank = region.subString(breakRegion.stop, stop - breakRegion.stop);
-    if (leftFlank.empty() || rightFlank.empty()) return;
+// =====================================================================
+// breakJoins — matches Scala
+// =====================================================================
+std::vector<std::tuple<int, std::string, std::string>>
+GapFiller::breakJoins(int start, const std::vector<std::string>& forwardPaths,
+                      const std::vector<std::string>& reversePaths, int stop) {
+    std::set<std::tuple<int, std::string, std::string>> solutionSet;
 
-    if (Pilon::verbose)
-        std::cout << "    radius=" << radius << " left=" << leftFlank.length()
-                  << " right=" << rightFlank.length() << std::endl;
+    for (const auto& f : forwardPaths) {
+        for (const auto& r : reversePaths) {
+            auto s = joinBreak(start, f, r, stop);
+            if (s != noSolution) {
+                solutionSet.insert(s);
+            }
+        }
+    }
 
-    // Recruit reads flanking the break from all BAMs
+    // Sort by total change length
+    std::vector<std::tuple<int, std::string, std::string>> solutions(
+        solutionSet.begin(), solutionSet.end());
+    std::sort(solutions.begin(), solutions.end(),
+              [](const auto& a, const auto& b) {
+                  return std::get<2>(a).length() + std::get<1>(a).length()
+                       < std::get<2>(b).length() + std::get<1>(b).length();
+              });
+
+    // If all solutions have the same delta length, return only the smallest total
+    std::set<int> deltas;
+    for (const auto& s : solutions) {
+        deltas.insert((int)(std::get<2>(s).length()) - (int)(std::get<1>(s).length()));
+    }
+    if (deltas.size() == 1) {
+        return {solutions.front()};
+    }
+    return solutions;
+}
+
+// =====================================================================
+// joinBreak — matches Scala
+// =====================================================================
+std::tuple<int, std::string, std::string>
+GapFiller::joinBreak(int startArg, const std::string& forward,
+                     const std::string& reverse, int stopArg) {
+    int kk = GapFiller::k;
+    std::string patch = properOverlap(forward, reverse, kk);
+
+    if (!patch.empty()) {
+        auto solution = trimPatch(startArg, patch, stopArg);
+        if (std::get<1>(solution) == std::get<2>(solution)) {
+            return solution;  // no change, but trimPatch result
+        }
+        return solution;
+    }
+    return noSolution;
+}
+
+// =====================================================================
+// consensusFromLeft — matches Scala
+// =====================================================================
+std::string GapFiller::consensusFromLeft(const std::vector<std::string>& seqs) const {
+    if (seqs.empty()) return "";
+    const std::string& s0 = seqs[0];
+    if (seqs.size() == 1) return s0;
+
+    int minLength = s0.length();
+    for (const auto& s : seqs) minLength = std::min(minLength, (int)s.length());
+
+    for (int i = 0; i < minLength; i++) {
+        for (size_t j = 1; j < seqs.size(); j++) {
+            if (seqs[j][i] != s0[i]) {
+                return s0.substr(0, i);
+            }
+        }
+    }
+    return s0.substr(0, minLength);
+}
+
+// =====================================================================
+// consensusFromRight — matches Scala
+// =====================================================================
+std::string GapFiller::consensusFromRight(const std::vector<std::string>& seqs) const {
+    if (seqs.empty()) return "";
+    const std::string& s0 = seqs[0];
+    if (seqs.size() == 1) return s0;
+
+    int minLength = s0.length();
+    for (const auto& s : seqs) minLength = std::min(minLength, (int)s.length());
+
+    for (int i = 0; i < minLength; i++) {
+        for (size_t j = 1; j < seqs.size(); j++) {
+            const std::string& sj = seqs[j];
+            int si = (int)sj.length() - 1 - i;
+            int s0i = (int)s0.length() - 1 - i;
+            if (sj[si] != s0[s0i]) {
+                return s0.substr(s0i + 1);
+            }
+        }
+    }
+    return s0.substr(s0.length() - minLength);
+}
+
+// =====================================================================
+// partialMatchesReference — matches Scala
+// =====================================================================
+bool GapFiller::partialMatchesReference(int start, const std::string& fromLeft,
+                                        const std::string& fromRight, int stop,
+                                        int /*loopLength*/) {
+    if ((int)fromLeft.length() > region_.size() || (int)fromRight.length() > region_.size())
+        return false;
+
+    if (start + (int)fromLeft.length() > region_.size() ||
+        stop - (int)fromRight.length() < 0)
+        return false;
+
+    bool leftMatch = true;
+    for (int i = 0; i < (int)fromLeft.length() && i + start < region_.size(); i++) {
+        if (fromLeft[i] != region_.baseAt(start + i)) { leftMatch = false; break; }
+    }
+    bool rightMatch = true;
+    int rightStart = stop - (int)fromRight.length();
+    for (int i = 0; i < (int)fromRight.length() && rightStart + i < region_.size(); i++) {
+        if (fromRight[i] != region_.baseAt(rightStart + i)) { rightMatch = false; break; }
+    }
+    return leftMatch && rightMatch;
+}
+
+// =====================================================================
+// assembleIntoBreak — matches Scala
+// =====================================================================
+std::tuple<int, std::vector<std::string>, std::vector<std::string>, int, std::string>
+GapFiller::assembleIntoBreak(const Region& brk, const std::vector<BamRead>& reads) {
     Assembler assembler;
-    assembler.addSeq(leftFlank);
-    assembler.addSeq(rightFlank);
+    assembler.addReads(reads);
+    assembler.buildGraph();
 
-    for (auto* bam : Pilon::bamFiles) {
-        if (!bam) continue;
-        std::vector<BamRead> flankReads = bam->recruitFlankReads(
-            Region(breakRegion.name, start, stop));
-        for (auto& br : flankReads) {
-            if (!br.bases.empty())
-                assembler.addGraphSeq(br.bases.c_str());
-        }
-        if (Pilon::verbose)
-            std::cout << "    recruited " << flankReads.size() << " reads from " << bam->path().c_str() << std::endl;
+    if (Pilon::fixNovel && !Pilon::novelContigs.empty()) {
+        assembler.addGraphSeqs(Pilon::novelContigs);
     }
 
+    int startOffset = breakRadius();
+    int start = std::max(region_.start, brk.start - startOffset);
+    int stop  = std::min(region_.start + region_.size(), brk.stop + startOffset);
+
+    std::string left  = region_.subString(start, brk.start - start);
+    std::string right = region_.subString(brk.stop, stop - brk.stop);
+
+    auto [forward, reverse, loop] = assembler.multiBridge(left, right);
+    return {start, forward, reverse, stop, loop};
+}
+
+// =====================================================================
+// assembleAcrossBreak — matches Scala
+// =====================================================================
+std::tuple<int, std::string, std::string>
+GapFiller::assembleAcrossBreak(const Region& brk, bool isGap) {
+    auto reads = recruitReads(brk);
+    auto [start, pathsFromLeft, pathsFromRight, stop, loop] = assembleIntoBreak(brk, reads);
+    tandemRepeat_ = loop;
+
+    auto solutions = breakJoins(start, pathsFromLeft, pathsFromRight, stop);
+
+    auto solution = noSolution;
+    if (solutions.size() == 1 || (Pilon::multiClosure && solutions.size() > 1)) {
+        solution = solutions.front();
+    }
+
+    bool solutionOK = (solution != noSolution) && (loop.empty() || !Pilon::trSafe);
+    if (solutionOK && isGap) {
+        int closedLength = (int)std::get<2>(solution).length();
+        int closedDiff = std::abs(closedLength - brk.size());
+        if (closedDiff > Pilon::gapMargin) solutionOK = false;
+    }
+
+    if (solutionOK) {
+        return solution;
+    }
+
+    if (isGap || (Pilon::fixBreaks && loop.empty())) {
+        auto fromRight = consensusFromRight(pathsFromRight);
+        auto fromLeft  = consensusFromLeft(pathsFromLeft);
+
+        int newStart = start + (int)fromLeft.length();
+        int newStop  = stop  - (int)fromRight.length();
+
+        if ((newStart >= brk.start + GapFiller::minExtend ||
+             newStop  <= brk.stop  - GapFiller::minExtend) &&
+            !partialMatchesReference(start, fromLeft, fromRight, stop, (int)loop.length())) {
+
+            int newGapLen = isGap ? std::max(Pilon::minGap, newStop - newStart) : Pilon::minGap;
+            std::string newGap(newGapLen, 'N');
+            std::string seq = fromLeft + newGap + fromRight;
+            auto partialSolution = trimPatch(start, seq, stop);
+            if (!std::get<2>(partialSolution).empty())
+                return partialSolution;
+        }
+    }
+    return noSolution;
+}
+
+// =====================================================================
+// fillGap / fixBreak — matches Scala
+// =====================================================================
+std::tuple<int, std::string, std::string> GapFiller::fillGap(const Region& gap) {
+    return assembleAcrossBreak(gap, true);
+}
+
+std::tuple<int, std::string, std::string> GapFiller::fixBreak(const Region& brk) {
+    return assembleAcrossBreak(brk, false);
+}
+
+// =====================================================================
+// breakRadius — matches Scala
+// =====================================================================
+int GapFiller::breakRadius() const {
+    int minRadius = 3 * Assembler::K;
+    int insertMean = 0;
+    int count = 0;
+    for (auto* bam : Pilon::bamFiles) {
+        if (bam && bam->bamType() == "frags") {
+            insertMean += (int)bam->insertSizeMean();
+            count++;
+        }
+    }
+    if (count > 0) insertMean = static_cast<int>(std::round(static_cast<double>(insertMean) / count));
+    return std::max(minRadius, insertMean);
+}
+
+// =====================================================================
+// Read recruitment — matches Scala
+// =====================================================================
+std::vector<BamRead> GapFiller::recruitReadsFromBams(const Region& reg,
+                                                     const std::vector<BamFile*>& bams) const {
+    std::vector<BamRead> reads;
+    for (auto* b : bams) {
+        if (!b) continue;
+        auto flankReads = b->recruitFlankReads(reg);
+        reads.insert(reads.end(), flankReads.begin(), flankReads.end());
+    }
+    return reads;
+}
+
+std::vector<BamRead> GapFiller::recruitReadsOfType(const Region& reg, const std::string& type) const {
+    std::vector<BamFile*> typedBams;
+    for (auto* bam : Pilon::bamFiles) {
+        if (bam && bam->bamType() == type) typedBams.push_back(bam);
+    }
+    return recruitReadsFromBams(reg, typedBams);
+}
+
+std::vector<BamRead> GapFiller::recruitFrags(const Region& reg) const {
+    return recruitReadsOfType(reg, "frags");
+}
+
+std::vector<BamRead> GapFiller::recruitJumps(const Region& reg) const {
+    std::vector<BamRead> reads;
+    for (auto* bam : Pilon::bamFiles) {
+        if (bam && bam->bamType() == "jumps") {
+            auto badMates = bam->recruitBadMates(reg);
+            reads.insert(reads.end(), badMates.begin(), badMates.end());
+        }
+    }
+    if (Pilon::debug)
+        std::cout << "# Recruiting jump bad mates: count=" << reads.size() << std::endl;
+    return reads;
+}
+
+std::vector<BamRead> GapFiller::recruitUnpaired(const Region& reg) const {
+    if (Pilon::longread) return {};
+    return recruitReadsOfType(reg, "unpaired");
+}
+
+std::vector<BamRead> GapFiller::recruitReads(const Region& brk) const {
+    auto frags = recruitFrags(brk);
+    auto jumps = recruitJumps(brk);
+    auto unp = recruitUnpaired(brk);
+    frags.insert(frags.end(), jumps.begin(), jumps.end());
+    frags.insert(frags.end(), unp.begin(), unp.end());
+    return frags;
+}
+
+// =====================================================================
+// Static wrappers (return Fix tuples for fixIssues pipeline)
+// =====================================================================
+std::tuple<int, std::string, std::string>
+GapFiller::doFixGap(GenomeRegion& region, const Region& gap) {
+    GapFiller filler(region);
     k = 2 * Assembler::K + 1;
-    int minOverlap = std::min(k, std::min((int)leftFlank.length(), (int)rightFlank.length()));
-    if (minOverlap < 10) minOverlap = 10;
-
-    // Try multiBridge using assembled reads
-    auto [fwd, rev, loop] = assembler.multiBridge(leftFlank, rightFlank);
-    bool bridgeFound = false;
-    std::string patch;
-
-    if (!fwd.empty() && !rev.empty()) {
-        if (Pilon::verbose)
-            std::cout << "    multiBridge: fwd[0]=" << fwd[0].length()
-                      << " rev[0]=" << rev[0].length()
-                      << " loop=" << loop.length() << std::endl;
-
-        // Try connecting forward path to right flank
-        int fwdOverlap = std::min((int)fwd[0].length(), (int)rightFlank.length());
-        for (int ov = std::min(fwdOverlap, 200); ov >= minOverlap; ov--) {
-            if (substrEq(fwd[0], fwd[0].length() - ov, rightFlank, 0, ov)) {
-                patch = fwd[0] + rightFlank.substr(ov);
-                bridgeFound = true;
-                break;
-            }
-        }
-
-        // Try connecting reverse path to left flank
-        if (!bridgeFound) {
-            int revOverlap = std::min((int)rev[0].length(), (int)leftFlank.length());
-            for (int ov = std::min(revOverlap, 200); ov >= minOverlap; ov--) {
-                if (substrEq(leftFlank, leftFlank.length() - ov, rev[0], 0, ov)) {
-                    patch = leftFlank + rev[0].substr(ov);
-                    bridgeFound = true;
-                    break;
-                }
-            }
-        }
-
-        // Try consensus between forward and reverse paths
-        if (!bridgeFound) {
-            int minLen = std::min((int)fwd[0].length(), (int)rev[0].length());
-            for (int ov = std::min(minLen, 200); ov >= minOverlap; ov--) {
-                if (substrEq(fwd[0], fwd[0].length() - ov, rev[0], 0, ov)) {
-                    patch = fwd[0] + rev[0].substr(ov);
-                    bridgeFound = true;
-                    break;
-                }
-            }
-        }
-
-        if (!bridgeFound) {
-            std::string combined = leftFlank + fwd[0] + rev[0];
-            patch = findProperOverlap(combined, rightFlank, minOverlap);
-            if (!patch.empty()) bridgeFound = true;
-        }
-    }
-
-    if (!bridgeFound && !fwd.empty() && !rev.empty()) {
-        patch = findProperOverlap(fwd[0], rev[0], minOverlap);
-        if (!patch.empty()) bridgeFound = true;
-    }
-
-    if (!bridgeFound && !loop.empty() && loop.length() >= (size_t)minOverlap) {
-        if (Pilon::verbose)
-            std::cout << "    using loop: " << loop.substr(0, 40) << std::endl;
-        patch = loop;
-        bridgeFound = true;
-    }
-
-    // Fallback: direct properOverlap
-    if (!bridgeFound) {
-        patch = findProperOverlap(leftFlank, rightFlank, minOverlap);
-        if (!patch.empty()) bridgeFound = true;
-    }
-
-    if (!bridgeFound) {
-        std::string rcRight = rightFlank;
-        std::reverse(rcRight.begin(), rcRight.end());
-        for (auto& c : rcRight) {
-            switch (c) {
-                case 'A': c = 'T'; break;
-                case 'T': c = 'A'; break;
-                case 'C': c = 'G'; break;
-                case 'G': c = 'C'; break;
-            }
-        }
-        patch = findProperOverlap(leftFlank, rcRight, minOverlap);
-        if (!patch.empty()) bridgeFound = true;
-    }
-
-    if (!bridgeFound && !fwd.empty()) {
-        patch = findProperOverlap(leftFlank, fwd[0], minOverlap);
-        if (!patch.empty()) bridgeFound = true;
-    }
-
-    if (bridgeFound) {
-        int trimStart = 0;
-        while (trimStart < (int)patch.length() && trimStart < radius &&
-               start + trimStart < region.stop &&
-               region.baseAt(start + trimStart) == patch[trimStart])
-            trimStart++;
-
-        int trimEnd = 0;
-        int plen = (int)patch.length();
-        while (trimEnd < plen && trimEnd < radius &&
-               stop - trimEnd - 1 >= 0 &&
-               region.baseAt(stop - trimEnd - 1) == patch[plen - 1 - trimEnd])
-            trimEnd++;
-
-        std::string trimmedPatch = patch.substr(trimStart, plen - trimStart - trimEnd);
-        if ((int)trimmedPatch.length() > 5) {
-            if (Pilon::verbose)
-                std::cout << "    bridge found: len=" << trimmedPatch.length()
-                          << " " << trimmedPatch.substr(0, 40) << "..." << std::endl;
-            region.fixBreakRegion(breakRegion, trimmedPatch);
-        } else if (Pilon::verbose) {
-            std::cout << "    patch too short after trim" << std::endl;
-        }
-    } else if (Pilon::verbose) {
-        std::cout << "    no bridge found" << std::endl;
-    }
+    return filler.fillGap(gap);
 }
 
-void GapFiller::fixGap(GenomeRegion& region, const Region& gapRegion) {
-    fixBreak(region, gapRegion);
+std::tuple<int, std::string, std::string>
+GapFiller::doFixBreak(GenomeRegion& region, const Region& brk) {
+    GapFiller filler(region);
+    k = 2 * Assembler::K + 1;
+    return filler.fixBreak(brk);
 }
 
-bool GapFiller::fixCircles(GenomeRegion& region, int gapMargin) {
-    if (Pilon::verbose) std::cout << "  fixCircles on " << region.name << std::endl;
-    int contigLen = region.size();
-    if (contigLen < 1000) return false;
-
-    int endLen = std::min(5000, contigLen / 2);
-
-    struct EndAlign {
-        std::string qname;
-        int start, end;
-        bool rc;
-        bool leftCant, rightCant;
-    };
-
-    std::vector<EndAlign> endAligns;
-
-    for (auto* bam : Pilon::bamFiles) {
-        if (!bam) continue;
-        std::vector<BamRead> reads = bam->readsInRegion(Region(region.name, 0, contigLen));
-        for (auto& br : reads) {
-            if (br.bases.empty()) continue;
-            int aStart = br.alignmentStart;
-            int aEnd = br.alignmentEnd;
-
-            if (aStart <= endLen && aStart < 100) {
-                if (br.negativeStrand)
-                    endAligns.push_back({br.readName, aStart, aEnd, br.negativeStrand, true, false});
-            }
-            if (aEnd >= contigLen - endLen && aEnd > contigLen - 100) {
-                if (!br.negativeStrand)
-                    endAligns.push_back({br.readName, aStart, aEnd, br.negativeStrand, false, true});
-            }
-        }
-        if (Pilon::verbose)
-            std::cout << "    " << reads.size() << " reads, " << endAligns.size()
-                      << " cantalevering from " << bam->path().c_str() << std::endl;
-    }
-
-    std::map<std::pair<std::string, bool>, EndAlign> pairedEnds;
-    bool circularFound = false;
-    for (auto& ea : endAligns) {
-        auto key = std::make_pair(ea.qname, ea.rc);
-        auto it = pairedEnds.find(key);
-        if (it != pairedEnds.end()) {
-            if ((it->second.leftCant && ea.rightCant) || (it->second.rightCant && ea.leftCant)) {
-                if (Pilon::verbose)
-                    std::cout << "    circular bridge: " << ea.qname << std::endl;
-                circularFound = true;
-            }
-        } else {
-            pairedEnds[key] = ea;
-        }
-    }
-
+// =====================================================================
+// closeCircle — matches Scala GapFiller.closeCircle
+// =====================================================================
+std::vector<std::tuple<int, std::string, std::string>>
+GapFiller::closeCircle(int estimatedLength) {
+    const int estimatedLengthSlop = 50;
+    
+    int trimToLength = (estimatedLength > 0) ? estimatedLength : region_.size() / 2;
+    int trimFlanks = std::max((region_.size() - trimToLength) / 2, 0);
+    int rightEnd = region_.start + trimFlanks;
+    Region rightFlank(region_.name, rightEnd, rightEnd + breakRadius());
+    int leftEnd = region_.start + region_.size() - trimFlanks;
+    Region leftFlank(region_.name, leftEnd - breakRadius(), leftEnd);
+    
     if (Pilon::verbose) {
-        int checkLen = std::min(500, contigLen / 4);
-        long leftCov = 0, rightCov = 0;
-        int n = 0;
-        for (int i = 0; i < checkLen && i < (int)region.coverage_arr.size(); i++) {
-            leftCov += region.coverage_arr[i];
-            rightCov += region.coverage_arr[region.coverage_arr.size() - 1 - i];
-            n++;
-        }
-        if (n > 0)
-            std::cout << "    end_cov avg=" << (leftCov + rightCov) / (2 * n) << std::endl;
-        std::cout << "    circular=" << (circularFound ? "yes" : "no") << std::endl;
+        std::cout << "left: " << leftFlank.toString() << std::endl;
+        std::cout << "right: " << rightFlank.toString() << std::endl;
     }
-
-    return circularFound;
+    
+    k = 2 * Assembler::K + 1;
+    
+    // Recruit reads
+    std::vector<BamRead> reads;
+    if (estimatedLength == 0) {
+        Region fullRegion(region_.name, region_.start, region_.start + region_.size());
+        reads = recruitReads(fullRegion);
+    } else {
+        for (auto* bam : Pilon::bamFiles) {
+            if (bam && bam->bamType() == "unpaired") {
+                auto leftReads = bam->readsInRegion(leftFlank);
+                auto rightReads = bam->readsInRegion(rightFlank);
+                reads.insert(reads.end(), leftReads.begin(), leftReads.end());
+                reads.insert(reads.end(), rightReads.begin(), rightReads.end());
+            }
+        }
+    }
+    
+    if (Pilon::verbose)
+        std::cout << "recruited " << reads.size() << " reads" << std::endl;
+    
+    std::string left = region_.subString(leftFlank.start, leftFlank.size());
+    std::string right = region_.subString(rightFlank.start, rightFlank.size());
+    
+    Assembler assembler;
+    assembler.addReads(reads);
+    assembler.buildGraph();
+    
+    auto [forward, reverse, loop] = assembler.multiBridge(left, right);
+    if (Pilon::verbose && !loop.empty())
+        std::cout << " loop: " << loop.size() << " " << loop << std::endl;
+    
+    std::set<std::string> patches;
+    for (const auto& f : forward) {
+        for (const auto& r : reverse) {
+            std::string patch = properOverlap(f, r, k);
+            if (!patch.empty() &&
+                (estimatedLength == 0 ||
+                 std::abs(static_cast<int>(patch.size()) - 2 * breakRadius()) < estimatedLengthSlop)) {
+                patches.insert(patch);
+            }
+        }
+    }
+    
+    if (Pilon::verbose) {
+        for (const auto& patch : patches)
+            std::cout << "patch " << patch.size() << ": " << patch << std::endl;
+    }
+    
+    std::set<int> lengths;
+    for (const auto& p : patches) lengths.insert(static_cast<int>(p.size()));
+    
+    if (Pilon::verbose)
+        std::cout << patches.size() << " patches; lengths ";
+    for (int l : lengths) std::cout << l << " ";
+    if (Pilon::verbose) std::cout << std::endl;
+    
+    if (lengths.size() == 1 &&
+        (estimatedLength == 0 || loop.empty() ||
+         std::abs(static_cast<int>(loop.size()) - estimatedLength) < estimatedLengthSlop)) {
+        std::string patch = *patches.begin();
+        if (Pilon::verbose) std::cout << "  " << patch << std::endl;
+        
+        // Scala: rightSolution = (1, region.subString(1, rightEnd + breakRadius), "") — 1-based locus
+        //        1 in 1-based = contig start, rightEnd = trimFlanks
+        // C++: use region_.start as contig start (0-based), same length
+        int rightLen = trimFlanks + breakRadius();
+        std::vector<std::tuple<int, std::string, std::string>> solutions;
+        
+        solutions.push_back({region_.start + 1,
+                              region_.subString(region_.start + 1, rightLen),
+                              ""});
+        
+        auto leftSolution = trimPatch(leftFlank.start, patch, region_.start + region_.size());
+        solutions.push_back(leftSolution);
+        
+        return solutions;
+    }
+    
+    tandemRepeat_ = loop;
+    return {};
 }
 
-void GapFiller::fixNovel(GenomeFile* genome, const std::vector<BamFile*>& bamFiles) {
+std::vector<std::tuple<int, std::string, std::string>>
+GapFiller::doCloseCircle(GenomeRegion& region, int estimatedLength) {
+    GapFiller filler(region);
+    return filler.closeCircle(estimatedLength);
+}
+
+// =====================================================================
+// fixNovel — matches Scala + existing implementation
+// =====================================================================
+void GapFiller::fixNovel(GenomeFile* genome, const std::vector<BamFile*>& /*bamFiles*/) {
     if (Pilon::verbose)
         std::cout << "  fixNovel: assembling novel contigs from unmapped reads" << std::endl;
 
-    // Build reference genome graph (matching Scala: genomeGraph = new Assembler(minDepth=1))
-    Assembler genomeGraph;
+    Assembler genomeGraph(1);
     if (genome) {
         for (auto& contig : genome->getContigs()) {
-            genomeGraph.addGraphSeq(contig.second.c_str());
+            genomeGraph.addGraphSeq(contig.second);
         }
     }
 
-    // Collect unmapped reads from non-jump BAMs (frags and unpaired)
     std::vector<BamRead> unaligned;
     for (auto* bam : Pilon::bamFiles) {
         if (!bam) continue;
-        // Scala: skip jump BAMs for novel assembly
         if (bam->bamType() == "jumps") continue;
-
-        std::vector<BamRead> ua = bam->getUnalignedReads();
+        auto ua = bam->getUnalignedReads();
         unaligned.insert(unaligned.end(), ua.begin(), ua.end());
-        if (Pilon::verbose)
-            std::cout << "    " << ua.size() << " unaligned from " << bam->path().c_str() << std::endl;
     }
 
-    if (unaligned.empty()) {
-        if (Pilon::verbose)
-            std::cout << "    no unaligned reads found" << std::endl;
-        return;
-    }
+    if (unaligned.empty()) return;
 
-    // Build assembler from unaligned reads (matching Scala: novelGraph = new Assembler)
-    Assembler novelGraph(Pilon::minDepth);  // Use proper depth threshold
+    Assembler novelGraph(Pilon::minDepth);
     novelGraph.addReads(unaligned);
+    auto novelContigs = novelGraph.novel(genomeGraph);
 
-    // Extract novel contigs by subtracting reference k-mers
-    std::vector<std::string> novelContigs = novelGraph.novel(genomeGraph);
-
-    if (Pilon::verbose)
-        std::cout << "    found " << novelContigs.size() << " novel contigs" << std::endl;
-
-    // Output novel contigs (matching Scala: write to <output>.novel.fasta)
-    std::string novelPath = Pilon::outputFile("novel.fasta");
-    FILE* out = fopen(novelPath.c_str(), "w");
-    if (out) {
-        int count = 0;
-        for (auto& nc : novelContigs) {
-            if ((int)nc.length() >= 200) {  // Filter: min length 200
-                count++;
-                fprintf(out, ">novel_contig_%d length=%zu coverage=%.1f\n",
-                        count, nc.length(), 1.0);
-                for (size_t i = 0; i < nc.length(); i += 80)
-                    fprintf(out, "%.*s\n", std::min(80, (int)(nc.length() - i)), nc.c_str() + i);
-            }
-        }
-        fclose(out);
-        if (Pilon::verbose)
-            std::cout << "    wrote " << count << " novel contigs to " << novelPath << std::endl;
-    }
+    // Store in Pilon::novelContigs (used by main.cpp for FASTA output)
+    Pilon::novelContigs = novelContigs;
 }
 
 } // namespace pilon

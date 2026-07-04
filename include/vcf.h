@@ -1,27 +1,10 @@
-/*
- * Copyright (c) 2012-2018 Broad Institute, Inc.
- *
- * This file is part of PilonCpp.
- *
- * PilonCpp is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2
- * as published by the Free Software Foundation.
- *
- * PilonCpp is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with PilonCpp.  If not, see <http://www.gnu.org/licenses/>.
- */
-
 #ifndef PILON_VCF_H
 #define PILON_VCF_H
 
 #include <string>
 #include <vector>
 #include <cstdio>
+#include <ctime>
 #include "genome.h"
 
 namespace pilon {
@@ -36,11 +19,20 @@ public:
     void writeHeader(const std::vector<std::pair<std::string, int>>& contigsWithSizes);
 
     void writeRecord(const GenomeRegion& region, int index,
-                     bool embedded = false, bool indelOkArg = true);
+                     bool embedded = false, bool indelOk = true);
 
     void writeFixRecord(const GenomeRegion& region, const GenomeRegion::Fix& fix);
 
+    void writeDup(const GenomeRegion& region, const Region& dup);
+
     void close();
+
+    FILE* writer() { return writer_; }
+
+    static void writeChangesFile(const std::vector<GenomeRegion>& regions,
+                                 const std::string& changesPath);
+
+    static bool fixContainsN(const GenomeRegion::Fix& fix);
 
 private:
     FILE* writer_;
@@ -49,4 +41,4 @@ private:
 
 } // namespace pilon
 
-#endif // PILON_VCF_H
+#endif

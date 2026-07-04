@@ -19,6 +19,7 @@
 #ifndef PILON_PILON_H
 #define PILON_PILON_H
 
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <unordered_set>

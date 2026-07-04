@@ -212,28 +212,25 @@ static int homoRun(const std::string& refBases, int i0) {
     return static_cast<int>(refBases.size()) - i0;
 }
 
-// Helper: add a base to pileup
+// Helper: add a base to pileup (matching Scala PileUpRegion.add)
+// Scala: if (pair) { pileup.add + baseCount++ } else { badPair++ }
 static void addPileup(GenomeRegion& region, int locus, char base, int qual, int mq, bool pair) {
     if (region.inRegion(locus)) {
-        int idx = region.index(locus);
         if (pair) {
-            region.pileUpRegion(idx).add(base, qual, mq);
+            region.pileUpRegion(region.index(locus)).add(base, qual, mq);
             region.baseCount++;
         } else {
-            region.pileUpRegion(idx).badPair++;
+            region.pileUpRegion(region.index(locus)).badPair++;
         }
     }
 }
 
-// Helper: remove a base from pileup
+// Helper: remove a base from pileup (matching Scala PileUpRegion.remove)
+// Scala: if (pair) { no-op } else { badPair-- }
 static void removePileup(GenomeRegion& region, int locus, char base, int qual, int mq, bool pair) {
-    if (region.inRegion(locus)) {
-        int idx = region.index(locus);
-        if (pair) {
-            region.pileUpRegion(idx).remove(base, qual, mq);
-        } else {
-            region.pileUpRegion(idx).badPair--;
-        }
+    if (!region.inRegion(locus)) return;
+    if (!pair) {
+        region.pileUpRegion(region.index(locus)).badPair--;
     }
 }
 
@@ -511,9 +508,11 @@ double BamFile::process(GenomeRegion& region, int printInterval) {
 
     hts_itr_t* iter = nullptr;
     if (index_) {
-        iter = sam_itr_queryi(index_, tid, region.start, region.stop);
+        iter = sam_itr_queryi(index_, tid, std::max(0, region.start - 10000),
+                              region.stop + 10000);
     } else {
-        iter = sam_itr_queryi(nullptr, tid, region.start, region.stop);
+        iter = sam_itr_queryi(nullptr, tid, std::max(0, region.start - 10000),
+                              region.stop + 10000);
     }
     if (!iter) return 0;
 
@@ -533,7 +532,7 @@ double BamFile::process(GenomeRegion& region, int printInterval) {
             addReadToPileup(region, bam, longReadType_);
             
             // Track insert size statistics
-            int insertSize = std::abs(bam->core.isize);
+            int insertSize = bam->core.isize;
             bool rc = (bam->core.flag & BAM_FREVERSE) != 0;
             addInsert(insertSize, rc);
         }
@@ -567,11 +566,14 @@ void BamFile::scan(const std::unordered_set<std::string>& seqsOfInterest) {
             if (bam->core.flag & BAM_FPAIRED) {
                 if (bam->core.flag & BAM_FPROPER_PAIR) {
                     proper_++;
-                    addInsert(std::abs(bam->core.isize),
+                    addInsert(bam->core.isize,
                              (bam->core.flag & BAM_FREVERSE) != 0);
                 } else if (Pilon::strays && !isMateUnmapped(bam)) {
                     const char* refName = sam_hdr_tid2name(header_, bam->core.tid);
-                    if (refName && seqsOfInterest.count(refName)) {
+                    const char* mateRef = sam_hdr_tid2name(header_, bam->core.mtid);
+                    bool refInInterest = refName && seqsOfInterest.count(refName);
+                    bool mateInInterest = mateRef && seqsOfInterest.count(mateRef);
+                    if (refInInterest || mateInInterest) {
                         BamRead read = bamToRead(bam, header_);
                         strayMateMap_.addRead(read);
                     }
@@ -654,6 +656,70 @@ std::vector<BamRead> BamFile::recruitFlankReads(const Region& region) const {
     return reads;
 }
 
+std::vector<BamRead> BamFile::recruitBadMates(const Region& region) const {
+    int midpoint = (region.start + region.stop) / 2;
+    Region flanks = flankRegion(region);
+    std::vector<BamRead> reads = readsInRegion(flanks);
+
+    // Build local mate maps (matching Scala MateMap)
+    std::unordered_map<std::string, const BamRead*> readMap1;
+    std::unordered_map<std::string, const BamRead*> readMap2;
+    for (const auto& r : reads) {
+        if (r.firstOfPair) readMap1[r.readName] = &r;
+        else readMap2[r.readName] = &r;
+    }
+
+    // Add stray mates (matching Scala mateMap.addStrays)
+    if (Pilon::strays) {
+        for (const auto& [name, r] : readMap1) {
+            if (readMap2.find(name) == readMap2.end()) {
+                BamRead* mate = strayMateMap_.lookupMate(*r);
+                if (mate) readMap2[name] = mate;
+            }
+        }
+        for (const auto& [name, r] : readMap2) {
+            if (readMap1.find(name) == readMap1.end()) {
+                BamRead* mate = strayMateMap_.lookupMate(*r);
+                if (mate) readMap1[name] = mate;
+            }
+        }
+    }
+
+    int frPctVal = pctFR();
+
+    // Filter for anchored reads with good orientation (matching Scala)
+    std::vector<BamRead> mates;
+    for (const auto& [name, r1] : readMap1) {
+        auto it = readMap2.find(name);
+        if (it == readMap2.end()) continue;
+        const auto& r2 = *it->second;
+
+        // Check r1 is not unmapped and not a proper pair
+        if (r1->unmapped || r1->properPair) continue;
+        
+        const auto& r = *r1;  // the anchored read
+        bool rc = r.negativeStrand;
+        int start = r.alignmentStart;
+        int end = r.alignmentEnd;
+        bool before = start < midpoint;
+        bool after = end > midpoint;
+
+        // FR orientation: anchored before midpoint on + strand, or after on - strand
+        bool frOrientation = (before && !rc) || (after && rc);
+
+        bool goodOrientation;
+        if (frPctVal > 100 - minOrientationPct) goodOrientation = frOrientation;
+        else if (frPctVal < minOrientationPct) goodOrientation = !frOrientation;
+        else goodOrientation = true;
+
+        if (goodOrientation && ((flanks.start <= start && start < flanks.stop) ||
+                                 (flanks.start <= end && end < flanks.stop)))
+            mates.push_back(r2);
+    }
+
+    return mates;
+}
+
 // Get unmapped reads for novel contig assembly
 std::vector<BamRead> BamFile::getUnalignedReads() const {
     std::vector<BamRead> results;
@@ -720,7 +786,7 @@ bool BamFile::validateRead(const bam1_t* bam) const {
 }
 
 void BamFile::addInsert(int insertSize, bool rc, bool unpaired) {
-    const int huge = 5 * 10000;
+    const int huge = 5 * getMaxInsertSizes()[bamType_];
     
     if (insertSize <= 0 || insertSize >= huge) return;
 
@@ -738,19 +804,19 @@ void BamFile::addInsert(int insertSize, bool rc, bool unpaired) {
 int BamFile::pctFR() const {
     long long total = insertStatsFR_.count + insertStatsRF_.count + insertStatsUnpaired_.count;
     if (total == 0) return 0;
-    return (insertStatsFR_.count * 100) / total;
+    return Utils::pct(insertStatsFR_.count, total);
 }
 
 int BamFile::pctRF() const {
     long long total = insertStatsFR_.count + insertStatsRF_.count + insertStatsUnpaired_.count;
     if (total == 0) return 0;
-    return (insertStatsRF_.count * 100) / total;
+    return Utils::pct(insertStatsRF_.count, total);
 }
 
 int BamFile::pctUnpaired() const {
     long long total = insertStatsFR_.count + insertStatsRF_.count + insertStatsUnpaired_.count;
     if (total == 0) return 0;
-    return (insertStatsUnpaired_.count * 100) / total;
+    return Utils::pct(insertStatsUnpaired_.count, total);
 }
 
 Region BamFile::flankRegion(const Region& region) const {

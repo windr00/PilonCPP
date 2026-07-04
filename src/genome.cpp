@@ -18,6 +18,7 @@
 #include "genome.h"
 #include "utils.h"
 #include "pilon.h"
+#include "bases.h"
 #include "gapfiller.h"
 #include "bamfile.h"
 #include "gapfiller.h"
@@ -59,7 +60,17 @@ static void processChunk(const std::string& name,
                         seq.substr(chunkStart, chunkStop - chunkStart),
                         Pilon::minDepth);
     for (auto* bam : threadBams) {
+        std::vector<long long> covBefore;
+        if (bam->bamType() != "jumps") {
+            covBefore.reserve(region.size());
+            for (int i = 0; i < region.size(); i++)
+                covBefore.push_back(region.pileUpRegion(i).depth());
+        }
         bam->process(region);
+        if (bam->bamType() != "jumps") {
+            for (int i = 0; i < region.size(); i++)
+                region.fragCoverage_arr[i] += static_cast<int>(region.pileUpRegion(i).depth() - covBefore[i]);
+        }
     }
     region.postProcess();
     if (Pilon::fixSnps || Pilon::fixIndels || Pilon::fixGaps || Pilon::fixLocal) {
@@ -87,7 +98,8 @@ GenomeRegion::GenomeRegion(const std::string& name, int start, int stop,
                            const std::string& bases, double minDepth)
     : name(name), start(start), stop(stop), contigBases(bases),
       originalBases(bases), bases(bases), minDepth(minDepth),
-      physCovStart(0), insertSizeStart(0), readCount(0), baseCount(0) {
+      physCovStart(0), insertSizeStart(0), readCount(0), baseCount(0),
+      pctBadOverall_(0) {
     int sz = stop - start;
     pileUps.resize(sz);
     confirmed.resize(sz, false);
@@ -109,26 +121,38 @@ GenomeRegion::GenomeRegion(const std::string& name, int start, int stop,
 // =============================================================================
 int GenomeRegion::size() const { return stop - start; }
 char GenomeRegion::baseAt(int pos) const {
-    if (pos >= 0 && pos < static_cast<int>(contigBases.size()))
-        return contigBases[pos];
+    int local = pos - start;
+    // Scala: defaults to mutable bases (post-SNP-correction) for subString/trimPatch
+    if (local >= 0 && local < static_cast<int>(bases.size()))
+        return bases[local];
     return 'N';
 }
 char GenomeRegion::originalBaseAt(int pos) const {
-    if (pos >= 0 && pos < static_cast<int>(originalBases.size()))
-        return originalBases[pos];
+    int local = pos - start;
+    if (local >= 0 && local < static_cast<int>(originalBases.size()))
+        return originalBases[local];
     return 'N';
 }
 char GenomeRegion::refBase(int pos) const {
-    int localPos = pos - start;
-    return baseAt(localPos);
+    // Scala: returns from contigBases (immutable original reference), not mutable bases
+    int local = pos - start;
+    if (local >= 0 && local < static_cast<int>(contigBases.size()))
+        return contigBases[local];
+    return 'N';
 }
-std::string GenomeRegion::subString(int start, int length) const {
-    if (start < 0 || start >= static_cast<int>(contigBases.size())) return "";
-    int len = std::min(length, static_cast<int>(contigBases.size()) - start);
-    return contigBases.substr(start, len);
+std::string GenomeRegion::subString(int locus, int length) const {
+    int local = locus - start;
+    // Scala: uses mutable bases (updated by SNP fixes before gap/break assembly)
+    if (local < 0 || local >= static_cast<int>(bases.size())) return "";
+    int len = std::min(length, static_cast<int>(bases.size()) - local);
+    return bases.substr(local, len);
 }
-std::string GenomeRegion::refSubString(int start, int length) const {
-    return subString(start, length);
+std::string GenomeRegion::refSubString(int locus, int length) const {
+    int local = locus - start;
+    // Scala: uses immutable contigBases (original reference)
+    if (local < 0 || local >= static_cast<int>(contigBases.size())) return "";
+    int len = std::min(length, static_cast<int>(contigBases.size()) - local);
+    return contigBases.substr(local, len);
 }
 PileUp& GenomeRegion::pileUpRegion(int index) {
     return pileUps[index];
@@ -231,25 +255,47 @@ void GenomeRegion::computeGc(int window) {
 
         if (inRegion(center))
             gc_arr[index(center)] = static_cast<int8_t>(gcCount);
+
+        if (inRegion(locus) && locus >= static_cast<int>(contigBases.size()) - halfWindow)
+            gc_arr[index(locus)] = static_cast<int8_t>(gcCount);
     }
 }
 
 // =============================================================================
 // Copy number estimation (matching Scala)
 // =============================================================================
+// Smooth function: sliding window average (matching Scala smooth())
+static std::vector<int> smooth(const std::vector<int>& input, int window) {
+    int inputSize = static_cast<int>(input.size());
+    std::vector<int> result(inputSize, 0);
+    int half = window / 2;
+    long long accum = 0;
+    for (int i = 0; i < inputSize; i++) {
+        accum += input[i];
+        if (i > window) {
+            accum -= input[i - window];
+            result[i - half] = (accum + half) / window;
+        }
+    }
+    if (inputSize > window) {
+        for (int i = 0; i < window - half; i++) result[i] = result[window - half];
+        for (int i = inputSize - half; i < inputSize; i++) result[i] = result[inputSize - half - 1];
+    } else {
+        for (int i = 0; i < inputSize; i++) result[i] = accum / inputSize;
+    }
+    return result;
+}
+
 void GenomeRegion::computeCopyNumber() {
     copyNumber_arr.resize(size(), 1.0);
-    // Simple approach: copy number = coverage / meanCoverage
-    long long totalDepth = 0;
-    int count = 0;
+    if (size() == 0) return;
+    auto smoothCov = smooth(fragCoverage_arr, 200);
+    double baseCov = fragCoverageDist ? fragCoverageDist->mean : 1.0;
+    if (baseCov < 1.0) baseCov = 1.0;
     for (int i = 0; i < size(); i++) {
-        totalDepth += pileUps[i].depth();
-        if (pileUps[i].depth() > 0) count++;
-    }
-    double meanCov = count > 0 ? static_cast<double>(totalDepth) / count : 1.0;
-    if (meanCov < 1.0) meanCov = 1.0;
-    for (int i = 0; i < size(); i++) {
-        copyNumber_arr[i] = pileUps[i].depth() / meanCov;
+        double cn = smoothCov[i] / baseCov;
+        // Scala: (cn).round.toShort — round to nearest integer short
+        copyNumber_arr[i] = std::round(cn);
     }
 }
 
@@ -348,7 +394,6 @@ void GenomeRegion::writeTracks(const std::string& prefix) const {
     // =============================================================================
     void GenomeRegion::fixBreakRegion(const Region& breakRegion, const std::string& patch) {
         int startPos = start + breakRegion.start;
-        int endPos = start + breakRegion.stop;
 
         if (Pilon::verbose) {
             std::cout << "    fixing break " << breakRegion.start << "-" << breakRegion.stop
@@ -399,9 +444,15 @@ void GenomeRegion::postProcess() {
         return;
     }
     
-    // excluded motifs for long reads (matching Scala)
-    if (Pilon::longread) {
-        excludeMotifs();
+    // excluded motifs for long reads (matching Scala: longReadOnly = Pilon.longread && fragBams.isEmpty)
+    {
+        bool hasFrags = false;
+        for (auto* bam : Pilon::bamFiles) {
+            if (bam && bam->bamType() == "frags") { hasFrags = true; break; }
+        }
+        if (Pilon::longread && !hasFrags) {
+            excludeMotifs();
+        }
     }
     
     // Pass 1: pull out values from pileups & call base changes
@@ -412,7 +463,7 @@ void GenomeRegion::postProcess() {
         auto bc = pu.baseCall();
         char b = bc.base;
         bool homo = bc.homo;
-        char r = contigBases[i];
+        char r = refBase(locus(i));
         
         // Store summary stats (matching Scala)
         coverage_arr[i] = n;
@@ -461,10 +512,34 @@ void GenomeRegion::postProcess() {
         }
     }
     
-    // Pass 2: computed values (simplified for now)
-    // Scala also computes copyNumber, fragCoverageDist here
+    // Pass 2: computed values
     computeGc();
     computeCopyNumber();
+
+    // Compute normal distributions (matching Scala lazy vals)
+    if (!coverage_arr.empty()) {
+        coverageDist.reset(new NormalDistribution(coverage_arr, 2));
+        badCoverageDist.reset(new NormalDistribution(badCoverage_arr, 2));
+        physCoverageDist.reset(new NormalDistribution(physCoverage_arr, 2));
+        insertSizeDist.reset(new NormalDistribution(insertSize_arr, 2));
+        weightedMqDist.reset(new NormalDistribution(
+            std::vector<int>(weightedMq_arr.begin(), weightedMq_arr.end()), 2));
+
+        // fragCoverage: use non-jump coverage (deep copy then compute)
+        std::vector<int> fragVec;
+        fragVec.reserve(fragCoverage_arr.size());
+        for (int v : fragCoverage_arr) fragVec.push_back(v);
+        fragCoverageDist.reset(new NormalDistribution(fragVec, 2));
+    }
+
+    // Compute pctBadOverall (matching Scala lazy val)
+    long long totalBad = 0;
+    long long totalGood = 0;
+    for (int i = 0; i < size(); i++) {
+        totalBad += badCoverage_arr[i];
+        totalGood += coverage_arr[i];
+    }
+    pctBadOverall_ = Utils::pct(totalBad, totalGood + totalBad);
 }
 // =============================================================================
 // fixFixList: Sort and remove overlapping fixes (matching Scala)
@@ -491,11 +566,11 @@ static std::vector<GenomeRegion::Fix> fixFixList(const std::vector<GenomeRegion:
                 int fix2len = std::get<1>(fix2).length() + std::get<2>(fix2).length();
                 
                 if (fix1len >= fix2len) {
-                    // Scala: fix1 wins, drop fix2, keep fix1 for further comparison
+                    // Scala: fixes = fix1 :: tail  (keep fix1, drop fix2, compare fix1 with tail.head next)
                     fixes.erase(fixes.begin() + 1);
                 } else {
-                    outList.push_back(fix2);
-                    fixes.erase(fixes.begin(), fixes.begin() + 2);
+                    // Scala: fixes = fix2 :: tail  (keep fix2, drop fix1, compare fix2 with tail.head next)
+                    fixes.erase(fixes.begin());
                 }
             } else {
                 outList.push_back(fix1);
@@ -509,6 +584,121 @@ static std::vector<GenomeRegion::Fix> fixFixList(const std::vector<GenomeRegion:
     
     return outList;
 }
+
+// =============================================================================
+// Break detection helpers (matching Scala)
+// =============================================================================
+
+int GenomeRegion::pctBadOverall() const { return pctBadOverall_; }
+
+int GenomeRegion::delta(int i, const std::vector<int>& values, int radius) const {
+    int left = values[std::max(0, i - radius)];
+    int right = values[std::min(size() - 1, i + radius)];
+    return std::abs(left - right);
+}
+
+int GenomeRegion::deltaCoverage(int i, int radius) const {
+    return delta(i, fragCoverage_arr, radius);
+}
+
+double GenomeRegion::deltaFraction(int i) const {
+    double mean = fragCoverageDist ? fragCoverageDist->mean : 1.0;
+    if (mean <= 0) return 0;
+    return deltaCoverage(i) / mean;
+}
+
+bool GenomeRegion::lowCoverage(int i) const {
+    return coverage_arr[i] < Pilon::minMinDepth && refBase(locus(i)) != 'N';
+}
+
+bool GenomeRegion::highClipping(int i) const {
+    return coverage_arr[i] >= Pilon::minMinDepth &&
+           Utils::pct(static_cast<long long>(clips_arr[i]),
+                      static_cast<long long>(coverage_arr[i])) >= 33;
+}
+
+bool GenomeRegion::tooBad(int i) const {
+    int good = coverage_arr[i];
+    int bad = badCoverage_arr[i];
+    int p = Utils::pct(static_cast<long long>(bad),
+                       static_cast<long long>(good + bad));
+    return p > pctBadOverall_ + 20;
+}
+
+double GenomeRegion::dipCoverage(int i, int radius) const {
+    int left = fragCoverage_arr[std::max(0, i - radius)];
+    int right = fragCoverage_arr[std::min(size() - 1, i + radius)];
+    int center = fragCoverage_arr[i];
+    return (left - center) + (right - center);
+}
+
+double GenomeRegion::dipFraction(int i) const {
+    double mean = fragCoverageDist ? fragCoverageDist->mean : 1.0;
+    if (mean <= 0) return 0;
+    return dipCoverage(i) / mean;
+}
+
+bool GenomeRegion::breakp(int i) const {
+    return lowCoverage(i) || highClipping(i) || tooBad(i) || (dipFraction(i) >= 1.5);
+}
+
+bool GenomeRegion::nearEdge(const Region& r, int radius) const {
+    return r.start - start < radius || stop - r.stop < radius;
+}
+
+bool GenomeRegion::nearAny(const std::vector<Region>& regions, int distance) const {
+    for (const auto& other : regions) {
+        if (other.name == name) {
+            bool overlaps = (other.start <= stop && other.stop >= start);
+            bool close = std::abs(other.stop - start) <= distance ||
+                         std::abs(other.start - stop) <= distance;
+            if (overlaps || close) return true;
+        }
+    }
+    return false;
+}
+
+std::vector<Region> GenomeRegion::summaryRegions(std::function<bool(int)> positionTest, int slop) const {
+    std::vector<Region> regions;
+    int first = -1;
+    int last = -1;
+
+    for (int i = 0; i < size(); i++) {
+        if (positionTest(i)) {
+            last = i;
+            if (first < 0) first = i;
+        } else {
+        if (last >= 0 && i > last + slop) {
+            regions.push_back(Region(name, locus(first), locus(last) + 1));
+            first = -1;
+            last = -1;
+        }
+    }
+}
+if (last >= 0) regions.push_back(Region(name, locus(first), locus(last) + 1));
+
+    // Reverse and filter near-edge (matching Scala's regions.reverse.filter(!nearEdge(_)))
+    std::reverse(regions.begin(), regions.end());
+    std::vector<Region> result;
+    for (const auto& r : regions) {
+        if (!nearEdge(r)) result.push_back(r);
+    }
+
+    return result;
+}
+
+std::vector<Region> GenomeRegion::gaps() const {
+    auto gapTest = [this](int i) -> bool {
+        return refBase(locus(i)) == 'N';
+    };
+    auto rawGaps = summaryRegions(gapTest);
+    std::vector<Region> result;
+    for (const auto& g : rawGaps) {
+        if (g.size() >= 10) result.push_back(g);
+    }
+    return result;
+}
+
 // =============================================================================
 // fixIssues: Apply fixes to bases (matching Scala fixIssues)
 // =============================================================================
@@ -526,7 +716,7 @@ void GenomeRegion::identifyAndFixIssues() {
         ChangeKind kind = change.kind;
         
         int loc = locus(i);
-        char rBase = contigBases[i];
+        char rBase = refBase(loc);
         char cBase = change.base;
         
         if (!excluded[i]) {
@@ -539,19 +729,8 @@ void GenomeRegion::identifyAndFixIssues() {
                 case AMB:
                     if (Pilon::fixSnps && !Pilon::longread) {
                         if (Pilon::iupac) {
-                            // Compute IUPAC base for ambiguous calls
-                            char iupacB = (rBase == 'A' && cBase == 'C') ? 'M' :
-                                          (rBase == 'A' && cBase == 'G') ? 'R' :
-                                          (rBase == 'A' && cBase == 'T') ? 'W' :
-                                          (rBase == 'C' && cBase == 'A') ? 'M' :
-                                          (rBase == 'C' && cBase == 'G') ? 'S' :
-                                          (rBase == 'C' && cBase == 'T') ? 'Y' :
-                                          (rBase == 'G' && cBase == 'A') ? 'R' :
-                                          (rBase == 'G' && cBase == 'C') ? 'S' :
-                                          (rBase == 'G' && cBase == 'T') ? 'K' :
-                                          (rBase == 'T' && cBase == 'A') ? 'W' :
-                                          (rBase == 'T' && cBase == 'C') ? 'Y' :
-                                          (rBase == 'T' && cBase == 'G') ? 'K' : 'N';
+                            // Scala: Bases.toIUPAC(cBase, bc.altBase)
+                            char iupacB = Bases::toIUPAC(cBase, change.altBase);
                             smallFixList.push_back({loc, std::string(1, rBase), std::string(1, iupacB)});
                         } else {
                             snpFixList.push_back({loc, std::string(1, rBase), std::string(1, cBase)});
@@ -585,7 +764,8 @@ void GenomeRegion::identifyAndFixIssues() {
         }
     }
     
-    // Apply SNP fixes first, then small+big fixes (matching Scala)
+    // Apply SNP fixes first (matching Scala: fixIssues(snpFixList))
+    // Do this BEFORE gap/break assembly so they work on corrected bases
     if (!snpFixList.empty()) {
         auto snpFixes = fixFixList(snpFixList);
         for (auto it = snpFixes.rbegin(); it != snpFixes.rend(); ++it) {
@@ -601,8 +781,80 @@ void GenomeRegion::identifyAndFixIssues() {
             }
         }
     }
-    
-    if (!smallFixList.empty() || !bigFixList.empty()) {
+
+    // Try to fill gaps (matching Scala identifyAndFixIssues)
+    if (Pilon::fixGaps) {
+        auto gapRegions = gaps();
+        if (!gapRegions.empty()) {
+            for (const auto& gap : gapRegions) {
+                auto fix = GapFiller::doFixGap(*this, gap);
+                int fixStart = std::get<0>(fix);
+                if (fixStart > 0) {
+                    bigFixList.push_back(fix);
+                }
+            }
+        }
+    }
+
+    // Try to fix local breaks (matching Scala identifyAndFixIssues)
+    if (Pilon::fixLocal) {
+        auto breakRegions = summaryRegions([this](int i) -> bool { return breakp(i); }, 200);
+        // Filter breaks near gaps (matching Scala: filter { !_.nearAny(gaps, 300) })
+        auto gapRegions = gaps();
+        std::vector<Region> filteredBreaks;
+        for (const auto& brk : breakRegions) {
+            // Check nearAny against gapRegions
+            bool nearGap = false;
+            for (const auto& g : gapRegions) {
+                if (std::abs(g.start - brk.stop) <= 300 || std::abs(g.stop - brk.start) <= 300 ||
+                    (brk.start <= g.stop && g.start <= brk.stop)) {
+                    nearGap = true;
+                    break;
+                }
+            }
+            if (!nearGap) filteredBreaks.push_back(brk);
+        }
+        if (!filteredBreaks.empty()) {
+            for (const auto& brk : filteredBreaks) {
+                auto fix = GapFiller::doFixBreak(*this, brk);
+                int fixStart = std::get<0>(fix);
+                const std::string& ref = std::get<1>(fix);
+                const std::string& patch = std::get<2>(fix);
+                if (fixStart > 0 && std::max(static_cast<int>(ref.length()), static_cast<int>(patch.length())) > 10) {
+                    bigFixList.push_back(fix);
+                } else if (Pilon::verbose || fixStart == 0) {
+                    // Log no-solution
+                }
+            }
+        }
+    }
+
+    // fixCircles: close circular contigs (matching Scala closeCircle)
+    if (Pilon::fixCircles) {
+        auto circleFixes = GapFiller::doCloseCircle(*this, 0);
+        for (const auto& fix : circleFixes) {
+            bigFixList.push_back(fix);
+        }
+    }
+
+    // Report large collapsed regions (matching Scala duplicationEvents)
+    auto dups = summaryRegions([this](int i) -> bool { return copyNumber_arr[i] > 1; }, 2000);
+    if (!dups.empty()) {
+        for (const auto& d : dups) {
+            if (d.size() > 10000 && Pilon::verbose)
+                std::cout << "Large collapsed region: " << d.toString() << " size " << d.size() << std::endl;
+        }
+    }
+
+    fixes.insert(fixes.end(), snpFixList.begin(), snpFixList.end());
+    fixes.insert(fixes.end(), smallFixList.begin(), smallFixList.end());
+    fixes.insert(fixes.end(), bigFixList.begin(), bigFixList.end());
+
+    // Deduplicate overlapping fixes (matching Scala fixFixList for VCF/changes output)
+    fixes = fixFixList(fixes);
+
+    // Apply all fixes (small + big) to bases (matching Scala: fixIssues(smallFixList ++ bigFixList))
+    {
         std::vector<Fix> allFixes;
         allFixes.insert(allFixes.end(), smallFixList.begin(), smallFixList.end());
         allFixes.insert(allFixes.end(), bigFixList.begin(), bigFixList.end());
@@ -632,36 +884,6 @@ void GenomeRegion::identifyAndFixIssues() {
             }
         }
     }
-    
-    // Store fixes for VCF output
-    fixes = snpFixList;
-    fixes.insert(fixes.end(), smallFixList.begin(), smallFixList.end());
-    fixes.insert(fixes.end(), bigFixList.begin(), bigFixList.end());
-
-    // fixLocal: attempt local reassembly for unresolved regions
-    if (Pilon::fixLocal && !pileUps.empty()) {
-        if (Pilon::verbose) {
-            std::cout << "  fixLocal for " << name << ":" << start << "-" << stop << std::endl;
-        }
-        // Find break regions: gaps in the contig or regions with poor consensus
-        for (int i = 0; i < size(); i++) {
-            if (contigBases[i] == 'N') {
-                // Found a gap - extend it
-                int gapStart = i;
-                while (i < size() && contigBases[i] == 'N') i++;
-                int gapEnd = i;
-                if (gapEnd > gapStart) {
-                    Region gap(name, gapStart, gapEnd);
-                    GapFiller::fixBreak(*this, gap);
-                }
-            }
-        }
-    }
-
-    // fixCircles: detect circular contigs
-    if (Pilon::fixCircles) {
-        GapFiller::fixCircles(*this, Pilon::gapMargin);
-    }
 }
 // =============================================================================
 // Write VCF record
@@ -674,7 +896,7 @@ void GenomeRegion::writeVcf(FILE* writer) const {
         if (!bc.called()) continue;
         if (pu.depth() < static_cast<long long>(minDepth)) continue;
         
-        char refB = contigBases[i];
+        char refB = refBase(locus(i));
         int pos = locus(i) + 1; // VCF is 1-based
         
         if (Pilon::fixSnps && bc.called() && !bc.isInsertion() && !bc.isDeletion()) {
@@ -708,12 +930,17 @@ void GenomeRegion::writeVcf(FILE* writer) const {
 // Write changes
 // =============================================================================
 void GenomeRegion::writeChanges(FILE* writer, const std::string& newName, int& offset) const {
+    int delta = 0;
     for (const auto& fix : fixes) {
-        int pos = std::get<0>(fix) + offset + 1; // 1-based
+        int loc = std::get<0>(fix) + offset + 1; // 1-based
+        int newLoc = loc + delta;
         const std::string& refSeq = std::get<1>(fix);
         const std::string& altSeq = std::get<2>(fix);
+        std::string fromDisplay = refSeq.empty() ? "." : refSeq;
+        std::string toDisplay = altSeq.empty() ? "." : altSeq;
         fprintf(writer, "%s\t%d\t%s\t%s\n",
-                newName.c_str(), pos, refSeq.c_str(), altSeq.c_str());
+                newName.c_str(), newLoc, fromDisplay.c_str(), toDisplay.c_str());
+        delta += static_cast<int>(altSeq.length()) - static_cast<int>(refSeq.length());
     }
     offset += static_cast<int>(bases.size()) - size();
 }
@@ -800,7 +1027,19 @@ void GenomeFile::processRegions(std::vector<BamFile*>& bamFiles) {
                                    seq.substr(chunkStart, chunkStop - chunkStart),
                                    Pilon::minDepth);
                 for (auto* bam : bamFiles) {
-                    if (bam) bam->process(region);
+                    if (bam) {
+                        std::vector<long long> covBefore;
+                        if (bam->bamType() != "jumps") {
+                            covBefore.reserve(region.size());
+                            for (int i = 0; i < region.size(); i++)
+                                covBefore.push_back(region.pileUpRegion(i).depth());
+                        }
+                        bam->process(region);
+                        if (bam->bamType() != "jumps") {
+                            for (int i = 0; i < region.size(); i++)
+                                region.fragCoverage_arr[i] += static_cast<int>(region.pileUpRegion(i).depth() - covBefore[i]);
+                        }
+                    }
                 }
                 region.postProcess();
                 if (Pilon::fixSnps || Pilon::fixIndels || Pilon::fixGaps || Pilon::fixLocal) {

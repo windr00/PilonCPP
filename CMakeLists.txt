@@ -26,6 +26,7 @@ set(SOURCES
     src/vcf.cpp
     src/assembler.cpp
     src/gapfiller.cpp
+    src/normal.cpp
     src/bamfile.cpp
     src/utils.cpp
     src/main.cpp

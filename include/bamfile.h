@@ -73,6 +73,9 @@ public:
     // Recruit reads flanking a region
     std::vector<BamRead> recruitFlankReads(const Region& region) const;
 
+    // Recruit bad/stray mates for jump library (matching Scala)
+    std::vector<BamRead> recruitBadMates(const Region& region) const;
+
     // Get unmapped reads for novel contig assembly
     std::vector<BamRead> getUnalignedReads() const;
 
@@ -177,7 +180,7 @@ private:
             for (const auto& [name, read] : readMap1) {
                 if (readMap2.find(name) != readMap2.end()) count++;
             }
-            return count;
+            return count * 2;
         }
     };
 

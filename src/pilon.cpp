@@ -19,6 +19,7 @@
 #include "pilon.h"
 #include "utils.h"
 #include "bamfile.h"
+#include "assembler.h"
 #include <iostream>
 #include <cstring>
 #include <getopt.h>
@@ -26,13 +27,15 @@
 namespace pilon {
 
 // Static member initialization
-const std::unordered_set<std::string> Pilon::fixChoices = {"all", "snps", "indels", "gaps", "local", "bases", "none"};
+// Scala: fixChoices = Set("snps", "indels", "gaps", "local")
+const std::unordered_set<std::string> Pilon::fixChoices = {"snps", "indels", "gaps", "local"};
 const std::unordered_set<std::string> Pilon::experimentalFixChoices = {"amb", "breaks", "circles", "novel", "scaffolds"};
 
-bool Pilon::fixSnps = true;
-bool Pilon::fixIndels = true;
-bool Pilon::fixGaps = true;
-bool Pilon::fixLocal = true;
+// Scala: all fix flags start as false; set from parseFixList/optionParse
+bool Pilon::fixSnps = false;
+bool Pilon::fixIndels = false;
+bool Pilon::fixGaps = false;
+bool Pilon::fixLocal = false;
 bool Pilon::fixAmb = false;
 bool Pilon::fixBreaks = false;
 bool Pilon::fixCircles = false;
@@ -42,7 +45,7 @@ bool Pilon::fixScaffolds = false;
 std::vector<BamFile*> Pilon::bamFiles;
 std::string Pilon::targets;
 std::string Pilon::genomePath;
-std::string Pilon::prefix;
+std::string Pilon::prefix = "pilon";    // Scala default: "pilon"
 std::string Pilon::outdir;
 bool Pilon::changes = false;
 bool Pilon::tracks = false;
@@ -76,52 +79,81 @@ bool Pilon::trSafe = true;
 
 std::vector<std::string> Pilon::novelContigs;
 
-// Threading
 int Pilon::threads = 1;
 
-// For logging
 std::vector<std::string> Pilon::commandArgs;
+
+// Update fix flags from fixList (called at end of optionParse, matching Scala)
+static void updateFixFlags() {
+    Pilon::fixSnps      = Pilon::fixList.count("snps") > 0;
+    Pilon::fixIndels    = Pilon::fixList.count("indels") > 0;
+    Pilon::fixGaps      = Pilon::fixList.count("gaps") > 0;
+    Pilon::fixLocal     = Pilon::fixList.count("local") > 0;
+    Pilon::fixAmb       = Pilon::fixList.count("amb") > 0;
+    Pilon::fixBreaks    = Pilon::fixList.count("breaks") > 0;
+    Pilon::fixCircles   = Pilon::fixList.count("circles") > 0;
+    Pilon::fixNovel     = Pilon::fixList.count("novel") > 0;
+    Pilon::fixScaffolds = Pilon::fixList.count("scaffolds") > 0;
+}
 
 void Pilon::parseFixList(const std::string& fix) {
     auto fixes = Utils::split(fix, ',');
-    for (const auto& f : fixes) {
+    if (fix.empty()) return;
+
+    // Scala: if first char is not '+' or '-', clear the list
+    if (fix[0] != '+' && fix[0] != '-') {
+        fixList.clear();
+    }
+
+    for (auto& f : fixes) {
         std::string trimmed = Utils::trim(f);
-        if (fixChoices.count(trimmed)) {
-            fixList.insert(trimmed);
-            if (trimmed == "all" || trimmed == "everything") {
-                fixSnps = true;
-                fixIndels = true;
-                fixGaps = true;
-                fixLocal = true;
-            } else if (trimmed == "bases") {
-                fixSnps = true;
-                fixIndels = true;
-            } else if (trimmed == "none") {
-                fixSnps = false;
-                fixIndels = false;
-                fixGaps = false;
-                fixLocal = false;
-            } else if (trimmed == "snps") fixSnps = true;
-            else if (trimmed == "indels") fixIndels = true;
-            else if (trimmed == "gaps") fixGaps = true;
-            else if (trimmed == "local") fixLocal = true;
-        } else if (experimentalFixChoices.count(trimmed)) {
-            fixList.insert(trimmed);
-            if (trimmed == "amb") fixAmb = true;
-            else if (trimmed == "breaks") fixBreaks = true;
-            else if (trimmed == "circles") fixCircles = true;
-            else if (trimmed == "novel") fixNovel = true;
-            else if (trimmed == "scaffolds") fixScaffolds = true;
+        if (trimmed.empty()) continue;
+
+        char pm = '+';
+        std::string fsym = trimmed;
+        if (trimmed[0] == '+' || trimmed[0] == '-') {
+            pm = trimmed[0];
+            fsym = trimmed.substr(1);
+        }
+
+        if (fsym == "all" || fsym == "default" || fsym == "everything") {
+            // Scala: fixList ++= fixChoices for both + and -, but - removes all
+            if (pm == '-') {
+                for (const auto& c : fixChoices) fixList.erase(c);
+            } else {
+                for (const auto& c : fixChoices) fixList.insert(c);
+            }
+        } else if (fsym == "none") {
+            fixList.clear();
+        } else if (fsym == "bases") {
+            // Scala: "bases" is shorthand for snps+indels
+            if (pm == '+') {
+                fixList.insert("snps");
+                fixList.insert("indels");
+            } else {
+                fixList.erase("snps");
+                fixList.erase("indels");
+            }
+        } else if (fixChoices.count(fsym)) {
+            if (pm == '+') fixList.insert(fsym);
+            else fixList.erase(fsym);
+        } else if (experimentalFixChoices.count(fsym)) {
+            std::cerr << "Warning: experimental fix option " << f << std::endl;
+            if (pm == '+') fixList.insert(fsym);
+            else fixList.erase(fsym);
         } else {
-            std::cerr << "Unknown fix: " << trimmed << std::endl;
+            std::cerr << "Error: unknown fix option " << f << std::endl;
+            exit(1);
         }
     }
 }
 
 std::string Pilon::outputFile(const std::string& name) {
-    if (!outdir.empty()) return outdir + "/" + name;
-    if (!prefix.empty()) return prefix + "." + name;
-    return name;
+    // Scala: prefix + name, e.g. "pilon" + "fasta" = "pilonfasta"
+    // Scala: if outdir non-empty => outdir + "/" + prefix + name
+    std::string fileName = prefix + name;
+    if (!outdir.empty()) return outdir + "/" + fileName;
+    return fileName;
 }
 
 void Pilon::printUsage() {
@@ -158,7 +190,7 @@ void Pilon::printHelp() {
               A bam file containing Pacific Biosciences read alignments. Experimental.
          OUTPUTS:
            --output prefix (or --prefix)
-              Prefix for output files
+              Prefix for output files (default: pilon)
            --outdir directory
               Use this directory for all output files.
            --changes
@@ -186,7 +218,7 @@ void Pilon::printHelp() {
                 "indels": try to fix small indels;
                 "gaps": try to fill gaps;
                 "local": try to detect and fix local misassemblies;
-                "all": all of the above (default);
+                "all": all of the above;
                 "bases": shorthand for "snps" and "indels" (for back compatibility);
                 "none": none of the above; new fasta file will not be written.
               The following are experimental fix types:
@@ -213,7 +245,6 @@ void Pilon::printHelp() {
               specification.
            --threads
               Number of parallel threads to use (default: 1).
-              Note: this option is C++ specific; the Scala version does not support multithreading.
            --verbose
               More verbose output.
            --debug
@@ -248,7 +279,6 @@ void Pilon::printHelp() {
 }
 
 void Pilon::parseOptions(int argc, char* argv[]) {
-    // Store command line arguments
     for (int i = 0; i < argc; i++) {
         commandArgs.push_back(argv[i]);
     }
@@ -277,7 +307,7 @@ void Pilon::parseOptions(int argc, char* argv[]) {
         {"nostrays",      no_argument,       0, 'S'},
         {"dumpreads",     no_argument,       0, 'R'},
         {"iupac",         no_argument,       0, 'I'},
-        {"nonpf",         no_argument,       0, 'K'},
+        {"nonpf",         no_argument,       0, 'Y'},
         {"variant",       no_argument,       0, 'W'},
         {"min-depth",     required_argument, 0, 'm'},
         {"mindepth",      required_argument, 0, 'm'},
@@ -285,7 +315,6 @@ void Pilon::parseOptions(int argc, char* argv[]) {
         {"minqual",       required_argument, 0, 'l'},
         {"min-mq",        required_argument, 0, 'M'},
         {"minmq",         required_argument, 0, 'M'},
-        {"min-min-depth", required_argument, 0, 'D'},
         {"min-min-depth", required_argument, 0, 'D'},
         {"chunk-size",    required_argument, 0, 's'},
         {"chunksize",     required_argument, 0, 's'},
@@ -310,7 +339,11 @@ void Pilon::parseOptions(int argc, char* argv[]) {
     int opt;
     int optionIndex = 0;
 
-    while ((opt = getopt_long(argc, argv, "i:o:f:j:b:U:N:P:x:ctvqdpunSRIm:l:M:D:s:F:G:g:Q:O:T:VZh", longOptions, &optionIndex)) != -1) {
+    // Scala: fixList starts as fixChoices (default: all fixes on)
+    fixList.clear();
+    for (const auto& c : fixChoices) fixList.insert(c);
+
+    while ((opt = getopt_long(argc, argv, "i:o:f:j:b:U:N:P:x:ctvqdpunSRIYWM:l:m:D:s:F:G:g:Q:O:T:VZh", longOptions, &optionIndex)) != -1) {
         switch (opt) {
             case 'i': genomePath = optarg; break;
             case 'o': prefix = optarg; break;
@@ -321,13 +354,26 @@ void Pilon::parseOptions(int argc, char* argv[]) {
             case 'P':
             case 'b': {
                 std::string type;
+                std::string subtype = "none";
                 if (opt == 'f') type = "frags";
                 else if (opt == 'j') type = "jumps";
                 else if (opt == 'U') type = "unpaired";
-                else if (opt == 'N') { type = "nanopore"; nanopore = true; longread = true; }
-                else if (opt == 'P') { type = "pacbio"; pacbio = true; longread = true; }
-                else type = "bam";
-                bamFiles.push_back(new BamFile(optarg, type));
+                else if (opt == 'N') {
+                    // Scala: new BamFile(file, "unpaired", "nanopore")
+                    type = "unpaired";
+                    subtype = "nanopore";
+                    nanopore = true;
+                    longread = true;
+                } else if (opt == 'P') {
+                    // Scala: new BamFile(file, "unpaired", "pacbio")
+                    type = "unpaired";
+                    subtype = "pacbio";
+                    pacbio = true;
+                    longread = true;
+                } else {
+                    type = "bam";
+                }
+                bamFiles.push_back(new BamFile(optarg, type, subtype));
                 break;
             }
             case 'x': parseFixList(optarg); break;
@@ -342,11 +388,11 @@ void Pilon::parseOptions(int argc, char* argv[]) {
             case 'S': strays = false; break;
             case 'R': dumpReads = true; break;
             case 'I': iupac = true; break;
-            case 'K': nonPf = true; break;
+            case 'Y': nonPf = true; break;
             case 'W': {
-                // --variant: equvialent to --vcf --fix all,breaks
+                // Scala --variant: vcf = true; fixList += "breaks"
                 vcf = true;
-                parseFixList("all,breaks");
+                fixList.insert("breaks");
                 break;
             }
             case 'm': minDepth = std::stod(optarg); break;
@@ -358,13 +404,13 @@ void Pilon::parseOptions(int argc, char* argv[]) {
             case 'G': gapMargin = std::stoi(optarg); break;
             case 'g': minGap = std::stoi(optarg); break;
             case 'Q': defaultQual = static_cast<uint8_t>(std::stoi(optarg)); break;
-            case 2:   /* --kmer / --K: stored but not used yet */ break;
+            case 2:   Assembler::K = std::stoi(optarg); break;  // --kmer / --K
             case 'O': outdir = optarg; break;
             case 'T': targets = optarg; break;
             case 'V': verbose = true; break;
             case 'Z': debug = true; verbose = true; break;
             case 1:   threads = std::stoi(optarg); break;
-            case 3:   // --version
+            case 3:
                 std::cout << "PilonCpp version 1.0.0" << std::endl;
                 exit(0);
             case 'h':
@@ -376,14 +422,12 @@ void Pilon::parseOptions(int argc, char* argv[]) {
         }
     }
 
+    // Set fix flags from fixList (matching Scala end of optionParse)
+    updateFixFlags();
+
     // Validate required options
     if (genomePath.empty()) {
-        std::cerr << "Error: --input is required" << std::endl;
-        printUsage();
-        exit(1);
-    }
-    if (prefix.empty()) {
-        std::cerr << "Error: --output is required" << std::endl;
+        std::cerr << "Error: --genome is required" << std::endl;
         printUsage();
         exit(1);
     }
@@ -391,10 +435,6 @@ void Pilon::parseOptions(int argc, char* argv[]) {
         std::cerr << "Error: at least one BAM file is required" << std::endl;
         printUsage();
         exit(1);
-    }
-    if (fixList.empty()) {
-        // Scala default: all fixes enabled
-        fixList = fixChoices;
     }
 
     // Scala: strays is only active when fixing gaps/local/scaffolds

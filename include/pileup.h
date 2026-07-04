@@ -19,6 +19,7 @@
 #ifndef PILON_PILEUP_H
 #define PILON_PILEUP_H
 
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <utility>

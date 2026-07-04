@@ -22,6 +22,7 @@
 #include "gapfiller.h"
 #include "bamfile.h"
 #include "utils.h"
+#include "bases.h"
 #include <iostream>
 #include <fstream>
 #include <algorithm>
@@ -29,183 +30,199 @@
 using namespace pilon;
 
 int main(int argc, char* argv[]) {
-    // Parse command line options
     Pilon::parseOptions(argc, argv);
 
-    std::cout << "PilonCpp - Genome assembly polishing tool" << std::endl;
-    std::cout << "=========================================" << std::endl;
-    std::cout << "Input genome: " << Pilon::genomePath << std::endl;
-    std::cout << "Output prefix: " << Pilon::prefix << std::endl;
-    std::cout << "BAM files: " << Pilon::bamFiles.size() << std::endl;
-    std::cout << "Fixes: ";
-    for (const auto& fix : Pilon::fixList) {
-        std::cout << fix << " ";
+    if (Pilon::outdir != "") {
+        Utils::mkdirs(Pilon::outdir);
     }
-    std::cout << std::endl;
 
-    // Load genome
-    std::cout << "\nLoading genome..." << std::endl;
+    // Scala: strays &= fixGaps || fixLocal || fixScaffolds (done in parseOptions)
+
+    std::cout << "PilonCpp - Genome assembly polishing tool" << std::endl;
+    std::cout << "Genome: " << Pilon::genomePath << std::endl;
+    std::cout << "Fixing " << Pilon::fixList.size() << " categories" << std::endl;
+
     GenomeFile genome(Pilon::genomePath, Pilon::targets);
-    
-    auto contigs = genome.getContigs();
-    std::cout << "Loaded " << contigs.size() << " contigs" << std::endl;
 
     // Open BAM files
-    std::cout << "\nOpening BAM files..." << std::endl;
     for (auto* bam : Pilon::bamFiles) {
-        if (bam->open()) {
-            std::cout << "  Opened: " << bam->path() << " (" << bam->bamType() << ")" << std::endl;
-        } else {
-            std::cerr << "  Failed to open: " << bam->path() << std::endl;
+        if (!bam->open()) {
+            std::cerr << "Failed to open BAM: " << bam->path() << std::endl;
         }
     }
 
-    // Scan BAM files for statistics
-    std::cout << "\nScanning BAM files..." << std::endl;
-    auto seqNames = genome.getContigs();
-    std::unordered_set<std::string> seqsOfInterest;
-    for (const auto& c : seqNames) {
-        seqsOfInterest.insert(c.first);
-    }
-    
-    for (auto* bam : Pilon::bamFiles) {
-        if (bam) {
-            bam->scan(seqsOfInterest);
+    // Scan BAM files (matching Scala: scan before processing)
+    if (Pilon::strays || Pilon::fixCircles) {
+        std::cout << "Scanning BAMs" << std::endl;
+        auto contigs = genome.getContigs();
+        std::unordered_set<std::string> seqsOfInterest;
+        for (const auto& c : contigs) seqsOfInterest.insert(c.first);
+        for (auto* bam : Pilon::bamFiles) {
+            if (bam) bam->scan(seqsOfInterest);
         }
+    }
+
+    // fixNovel: assemble novel contigs before region processing
+    if (Pilon::fixNovel) {
+        std::cout << "Assembling novel sequence" << std::endl;
+        Assembler genomeGraph(1);
+        for (const auto& contig : genome.getContigs()) {
+            genomeGraph.addGraphSeq(contig.second);
+        }
+        Assembler assembler;
+        for (auto* bam : Pilon::bamFiles) {
+            if (bam && bam->bamType() != "jumps") {
+                auto reads = bam->getUnalignedReads();
+                assembler.addReads(reads);
+            }
+        }
+        auto novelContigs = assembler.novel(genomeGraph);
+        Pilon::novelContigs = novelContigs;
+
+        int totalBases = 0;
+        for (const auto& nc : novelContigs) totalBases += nc.size();
+        std::cout << "Assembled " << novelContigs.size() << " novel contigs containing "
+                  << totalBases << " bases" << std::endl;
     }
 
     // Process genome regions
-    std::cout << "\nProcessing genome regions..." << std::endl;
+    std::cout << "Input genome size: " << genome.getContigSizes().size() << " contigs" << std::endl;
     genome.processRegions(Pilon::bamFiles);
 
-    // Output VCF if requested
+    // Set up VCF if requested (matching Scala)
+    Vcf* vcf = nullptr;
     if (Pilon::vcf) {
-        std::string vcfPath = Pilon::outputFile("variants.vcf");
-        std::cout << "\nWriting VCF: " << vcfPath << std::endl;
-        
         auto contigSizes = genome.getContigSizes();
-        Vcf vcf(vcfPath, contigSizes);
-        
-        // Write variant records from processed regions
-        const auto& regions = genome.getProcessedRegions();
-        int totalVariants = 0;
-        
-        for (const auto& region : regions) {
-            for (int i = 0; i < region.size(); i++) {
-                const PileUp& pu = region.pileUpRegion(i);
-                auto bc = pu.baseCall();
-                
-                // Skip if no call or depth too low
-                if (!bc.called() || pu.depth() < Pilon::minDepth) continue;
-                
-                char refBase = region.baseAt(i);
-                
-                // Write SNP variants
-                if (Pilon::fixSnps && bc.called() && !bc.isInsertion() && !bc.isDeletion()) {
-                    if (!bc.baseMatch(refBase)) {
-                        vcf.writeRecord(region, i, false, false);
-                        totalVariants++;
-                    }
-                }
-                
-                // Write indel variants
-                if (Pilon::fixIndels && (bc.isInsertion() || bc.isDeletion())) {
-                    vcf.writeRecord(region, i, false, true);
-                    totalVariants++;
-                }
-            }
-        }
-        
-        vcf.close();
-        std::cout << "  Written " << totalVariants << " variant records" << std::endl;
-        
-        // Free pileup memory after VCF is done (saves ~90% memory per chunk)
-        for (auto& region : genome.getProcessedRegions()) {
-            region.freeMemory();
-        }
-    } else {
-        // Free memory already done in processRegions
+        std::string vcfPath = Pilon::outputFile(".vcf");
+        std::cout << "Writing VCF to " << vcfPath << std::endl;
+        vcf = new Vcf(vcfPath, contigSizes);
     }
 
-    // --tracks: Output IGV track files
-    if (Pilon::tracks) {
-        std::string trackPrefix = Pilon::outputFile("tracks");
-        std::cout << "Writing tracks: " << trackPrefix << "_*.wig" << std::endl;
-        for (auto& region : genome.getProcessedRegions()) {
-            region.writeTracks(trackPrefix);
-        }
+    // Set up changes file if requested
+    std::ofstream* changesFile = nullptr;
+    if (Pilon::changes) {
+        std::string changesPath = Pilon::outputFile(".changes");
+        changesFile = new std::ofstream(changesPath);
+        std::cout << "Writing changes to " << changesPath << std::endl;
     }
 
-    // fixNovel: assemble novel contigs from unmapped reads
-    if (Pilon::fixNovel) {
-        GapFiller::fixNovel(&genome, Pilon::bamFiles);
+    // Write polished FASTA (matching Scala)
+    bool writeFasta = Pilon::fixSnps || Pilon::fixIndels || Pilon::fixGaps ||
+                      Pilon::fixLocal || Pilon::fixNovel;
+    std::ofstream* fastaFile = nullptr;
+    if (writeFasta) {
+        std::string fastaPath = Pilon::outputFile(".fasta");
+        std::cout << "Writing polished genome to " << fastaPath << std::endl;
+        fastaFile = new std::ofstream(fastaPath);
     }
 
-    // Output polished genome
-    std::string outputPath = Pilon::outputFile("fasta");
-    std::cout << "\nWriting polished genome: " << outputPath << std::endl;
-    
-    std::ofstream outFile(outputPath);
-    if (!outFile.is_open()) {
-        std::cerr << "Error: Cannot open output file: " << outputPath << std::endl;
-        return 1;
-    }
-
-    // Write fixed sequences (matching Scala: reg._2 map { _.bases })
     auto& regions = genome.getProcessedRegions();
     std::string currentName;
     std::string currentSeq;
-    
+
     for (const auto& region : regions) {
         if (region.name != currentName) {
-            // Write previous contig if exists
-            if (!currentName.empty()) {
-                // Scala uses name_pilon suffix
+            // Write previous contig
+            if (!currentName.empty() && fastaFile && fastaFile->is_open()) {
                 std::string newName = currentName;
                 if (currentName.find('|') == std::string::npos) {
                     newName += "_pilon";
-                } else if (currentName.back() == '|') {
-                    // keep as is
-                } else {
+                } else if (currentName.back() != '|') {
                     newName += "|pilon";
+                } else {
+                    newName += "pilon";
                 }
-                outFile << ">" << newName << std::endl;
-                // Write sequence in 80-character lines (matching Scala)
+                (*fastaFile) << ">" << newName << "\n";
                 for (size_t i = 0; i < currentSeq.length(); i += 80) {
-                    outFile << currentSeq.substr(i, 80) << std::endl;
+                    (*fastaFile) << currentSeq.substr(i, 80) << "\n";
                 }
             }
             currentName = region.name;
             currentSeq.clear();
         }
-        // Append fixed bases (matching Scala: reg._2 map { _.bases })
         currentSeq += region.bases;
+
+        // Write VCF records for this region
+        if (vcf) {
+            // Write fix records for local reassembly (matching Scala writeFixRecord)
+            // Scala only writes for big fixes (reassembly), not pileup-based small indels
+            for (const auto& fix : region.fixes) {
+                const std::string& ref = std::get<1>(fix);
+                const std::string& patch = std::get<2>(fix);
+                // Big fix: involves large change or contains N (gap fill/break repair)
+                if (ref.length() >= 10 || patch.length() >= 10 ||
+                    ref.find('N') != std::string::npos || patch.find('N') != std::string::npos) {
+                    vcf->writeFixRecord(region, fix);
+                }
+            }
+            // Write per-position records
+            for (int i = 0; i < region.size(); i++) {
+                vcf->writeRecord(region, i, false, true);
+            }
+        }
+
+        // Write changes
+        if (changesFile && changesFile->is_open()) {
+            int delta = 0;
+            for (const auto& fix : region.fixes) {
+                int loc = std::get<0>(fix) + delta;
+                const std::string& from = std::get<1>(fix);
+                const std::string& to = std::get<2>(fix);
+                std::string fromDisplay = from.empty() ? "." : from;
+                std::string toDisplay = to.empty() ? "." : to;
+                (*changesFile) << region.name << "\t" << loc << "\t" << fromDisplay << "\t" << toDisplay << "\n";
+                delta += static_cast<int>(to.length()) - static_cast<int>(from.length());
+            }
+        }
     }
-    
+
     // Write last contig
-    if (!currentName.empty()) {
+    if (!currentName.empty() && fastaFile && fastaFile->is_open()) {
         std::string newName = currentName;
         if (currentName.find('|') == std::string::npos) {
             newName += "_pilon";
-        } else if (currentName.back() == '|') {
-            // keep as is
-        } else {
+        } else if (currentName.back() != '|') {
             newName += "|pilon";
         }
-        outFile << ">" << newName << std::endl;
+        (*fastaFile) << ">" << newName << "\n";
         for (size_t i = 0; i < currentSeq.length(); i += 80) {
-            outFile << currentSeq.substr(i, 80) << std::endl;
+            (*fastaFile) << currentSeq.substr(i, 80) << "\n";
         }
     }
-    
-    outFile.close();
 
-    // Clean up
+    // Write novel contigs to FASTA (matching Scala)
+    if (Pilon::fixNovel && fastaFile && fastaFile->is_open()) {
+        const auto& novelContigs = Pilon::novelContigs;
+        for (size_t n = 0; n < novelContigs.size(); n++) {
+            char header[64];
+            snprintf(header, sizeof(header), "pilon_novel_%03zu", n + 1);
+            std::cout << "Appending " << header << " length " << novelContigs[n].size() << std::endl;
+            (*fastaFile) << ">" << header << "\n";
+            for (size_t i = 0; i < novelContigs[n].size(); i += 80) {
+                (*fastaFile) << novelContigs[n].substr(i, 80) << "\n";
+            }
+        }
+    }
+
+    if (fastaFile) { fastaFile->close(); delete fastaFile; }
+    if (vcf) { vcf->close(); delete vcf; }
+    if (changesFile) { changesFile->close(); delete changesFile; }
+
+    // Output IGV tracks
+    if (Pilon::tracks) {
+        std::string trackPrefix = Pilon::outputFile("");
+        std::cout << "Writing tracks" << std::endl;
+        for (auto& region : regions) {
+            region.writeTracks(trackPrefix);
+        }
+    }
+
+    // Cleanup
     for (auto* bam : Pilon::bamFiles) {
         delete bam;
     }
     Pilon::bamFiles.clear();
 
-    std::cout << "\nDone!" << std::endl;
+    std::cout << "Done!" << std::endl;
     return 0;
 }
