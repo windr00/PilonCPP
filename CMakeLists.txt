@@ -4,19 +4,31 @@ project(piloncpp VERSION 1.0.0 LANGUAGES CXX C)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Find htslib directly (Ubuntu libhts-dev doesn't provide pkg-config .pc file)
-find_path(HTSLIB_INCLUDE_DIR hts.h PATH_SUFFIXES htslib)
-find_library(HTSLIB_LIBRARY hts)
+# ---- Static htslib (downloaded and built on first configure) ----
+include(ExternalProject)
 
-if(NOT HTSLIB_INCLUDE_DIR OR NOT HTSLIB_LIBRARY)
-    message(FATAL_ERROR "htslib not found. Please install libhts-dev.")
-endif()
+set(HTSLIB_SRC ${CMAKE_BINARY_DIR}/htslib_src)
 
-# Include directories
+ExternalProject_Add(htslib_ep
+    URL https://github.com/samtools/htslib/releases/download/1.19/htslib-1.19.tar.bz2
+    SOURCE_DIR ${HTSLIB_SRC}
+    BUILD_IN_SOURCE ON
+    CONFIGURE_COMMAND ${HTSLIB_SRC}/configure --disable-libcurl --disable-plugins --without-libdeflate --disable-bz2 --disable-lzma
+    BUILD_COMMAND make -C ${HTSLIB_SRC} lib-static
+    INSTALL_COMMAND ""
+    BUILD_BYPRODUCTS ${HTSLIB_SRC}/libhts.a
+)
+
+# Create an imported target for the static library
+add_library(hts STATIC IMPORTED)
+set_target_properties(hts PROPERTIES IMPORTED_LOCATION ${HTSLIB_SRC}/libhts.a)
+add_dependencies(hts htslib_ep)
+
+# ---- Include paths ----
 include_directories(${CMAKE_SOURCE_DIR}/include)
-include_directories(${HTSLIB_INCLUDE_DIR})
+include_directories(${HTSLIB_SRC}/htslib)
 
-# Source files
+# ---- Source files ----
 set(SOURCES
     src/bases.cpp
     src/basesum.cpp
@@ -32,28 +44,24 @@ set(SOURCES
     src/main.cpp
 )
 
-# Executable
 add_executable(piloncpp ${SOURCES})
 
-# Link libraries
-find_library(BZ2_LIBRARIES bz2)
-find_library(Z_LIBRARIES z)
-find_library(CURL_LIBRARIES curl)
+# ---- Link (static htslib + static C++ runtime) ----
 find_package(Threads REQUIRED)
 
-target_link_libraries(piloncpp ${HTSLIB_LIBRARY} Threads::Threads)
-if(BZ2_LIBRARIES)
-    target_link_libraries(piloncpp ${BZ2_LIBRARIES})
-endif()
-if(Z_LIBRARIES)
-    target_link_libraries(piloncpp ${Z_LIBRARIES})
-endif()
-if(CURL_LIBRARIES)
-    target_link_libraries(piloncpp ${CURL_LIBRARIES})
-endif()
+target_link_libraries(piloncpp PRIVATE
+    hts
+    Threads::Threads
+    dl m z
+)
 
-# Compiler options
+target_link_options(piloncpp PRIVATE
+    -static-libstdc++
+    -static-libgcc
+)
+
+# ---- Compiler flags ----
 target_compile_options(piloncpp PRIVATE -O2 -Wall -Wextra)
 
-# Install
+# ---- Install ----
 install(TARGETS piloncpp DESTINATION bin)
