@@ -80,6 +80,8 @@ bool Pilon::trSafe = true;
 std::vector<std::string> Pilon::novelContigs;
 
 int Pilon::threads = 1;
+int Pilon::scanThreads = 0;
+int Pilon::cacheSizeMb = 256;
 
 std::vector<std::string> Pilon::commandArgs;
 
@@ -244,7 +246,14 @@ void Pilon::printHelp() {
               If "targetlist" is the name of a file, each line will be treated as a target
               specification.
            --threads
-              Number of parallel threads to use (default: 1).
+              Number of parallel threads for region processing (default: 1).
+           --scan-threads
+              Number of threads for BAM I/O during scan phase (default: same as --threads).
+              Higher values accelerate the initial BAM scanning step via htslib's internal
+              multi-threaded BGZF decompression.
+           --cache-mb
+              Read-ahead cache size in MB for BAM scanning (default: 256). Increase for
+              mechanical drives or network filesystems to reduce seek overhead.
            --verbose
               More verbose output.
            --debug
@@ -332,6 +341,8 @@ void Pilon::parseOptions(int argc, char* argv[]) {
         {"debug",         no_argument,       0, 'Z'},
         {"version",       no_argument,       0, 3},
         {"threads",       required_argument, 0, 1},
+        {"scan-threads",  required_argument, 0, 4},
+        {"cache-mb",      required_argument, 0, 5},
         {"help",          no_argument,       0, 'h'},
         {0, 0, 0, 0}
     };
@@ -410,6 +421,8 @@ void Pilon::parseOptions(int argc, char* argv[]) {
             case 'V': verbose = true; break;
             case 'Z': debug = true; verbose = true; break;
             case 1:   threads = std::stoi(optarg); break;
+            case 4:   scanThreads = std::stoi(optarg); break;
+            case 5:   cacheSizeMb = std::stoi(optarg); break;
             case 3:
                 std::cout << "PilonCpp version 1.0.0" << std::endl;
                 exit(0);

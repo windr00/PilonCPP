@@ -89,6 +89,8 @@ public:
 
     // Threading
     static int threads;
+    static int scanThreads;
+    static int cacheSizeMb;
 
     // For logging
     static std::vector<std::string> commandArgs;

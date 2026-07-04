@@ -30,6 +30,9 @@
 using namespace pilon;
 
 int main(int argc, char* argv[]) {
+    // Suppress htslib index-age warnings in multi-threaded mode
+    hts_set_log_level(HTS_LOG_ERROR);
+    
     Pilon::parseOptions(argc, argv);
 
     if (Pilon::outdir != "") {
@@ -44,9 +47,11 @@ int main(int argc, char* argv[]) {
 
     GenomeFile genome(Pilon::genomePath, Pilon::targets);
 
-    // Open BAM files
+    // Open BAM files with I/O threads for scan phase
+    int scanThreads = Pilon::scanThreads > 0 ? Pilon::scanThreads : Pilon::threads;
+    if (scanThreads < 1) scanThreads = 1;
     for (auto* bam : Pilon::bamFiles) {
-        if (!bam->open()) {
+        if (!bam->open(scanThreads)) {
             std::cerr << "Failed to open BAM: " << bam->path() << std::endl;
         }
     }
@@ -65,10 +70,14 @@ int main(int argc, char* argv[]) {
     // fixNovel: assemble novel contigs before region processing
     if (Pilon::fixNovel) {
         std::cout << "Assembling novel sequence" << std::endl;
+        std::cout << "  Building genome graph..." << std::flush;
         Assembler genomeGraph(1);
         for (const auto& contig : genome.getContigs()) {
             genomeGraph.addGraphSeq(contig.second);
         }
+        std::cout << " done" << std::endl;
+        
+        std::cout << "  Adding unaligned reads..." << std::flush;
         Assembler assembler;
         for (auto* bam : Pilon::bamFiles) {
             if (bam && bam->bamType() != "jumps") {
@@ -76,8 +85,12 @@ int main(int argc, char* argv[]) {
                 assembler.addReads(reads);
             }
         }
+        std::cout << " done" << std::endl;
+        
+        std::cout << "  Discovering novel contigs..." << std::flush;
         auto novelContigs = assembler.novel(genomeGraph);
         Pilon::novelContigs = novelContigs;
+        std::cout << " done" << std::endl;
 
         int totalBases = 0;
         for (const auto& nc : novelContigs) totalBases += nc.size();
@@ -120,6 +133,11 @@ int main(int argc, char* argv[]) {
     std::string currentName;
     std::string currentSeq;
 
+    // Compute total positions for VCF progress
+    long long totalVcfPos = 0;
+    for (const auto& region : regions) totalVcfPos += region.size();
+    long long vcfPosDone = 0;
+
     for (const auto& region : regions) {
         if (region.name != currentName) {
             // Write previous contig
@@ -159,6 +177,12 @@ int main(int argc, char* argv[]) {
             for (int i = 0; i < region.size(); i++) {
                 vcf->writeRecord(region, i, false, true);
             }
+            vcfPosDone += region.size();
+            if (totalVcfPos > 0 && vcfPosDone % 500000 < static_cast<long long>(region.size())) {
+                int pct = static_cast<int>(vcfPosDone * 100 / totalVcfPos);
+                printf("\r  Writing VCF... %d%%", pct);
+                fflush(stdout);
+            }
         }
 
         // Write changes
@@ -174,6 +198,11 @@ int main(int argc, char* argv[]) {
                 delta += static_cast<int>(to.length()) - static_cast<int>(from.length());
             }
         }
+    }
+
+    // VCF progress completion
+    if (vcf) {
+        printf("\r  Writing VCF... done (%lld positions)\n", (long long)vcfPosDone);
     }
 
     // Write last contig

@@ -21,7 +21,11 @@ namespace pilon {
 int GapFiller::k = 0;
 const std::tuple<int, std::string, std::string> GapFiller::noSolution = {0, "", ""};
 
-GapFiller::GapFiller(GenomeRegion& region) : region_(region) {}
+GapFiller::GapFiller(GenomeRegion& region, std::vector<BamFile*>* bamHandles)
+    : region_(region), threadBams_(bamHandles) {}
+
+// Use thread-local BAM handles if available, otherwise fall back to global
+#define BAMS() (threadBams_ ? *threadBams_ : Pilon::bamFiles)
 
 static bool substrEq(const std::string& a, int aOff, const std::string& b, int bOff, int len) {
     if (aOff + len > (int)a.length() || bOff + len > (int)b.length()) return false;
@@ -294,7 +298,7 @@ int GapFiller::breakRadius() const {
     int minRadius = 3 * Assembler::K;
     int insertMean = 0;
     int count = 0;
-    for (auto* bam : Pilon::bamFiles) {
+    for (auto* bam : BAMS()) {
         if (bam && bam->bamType() == "frags") {
             insertMean += (int)bam->insertSizeMean();
             count++;
@@ -320,7 +324,7 @@ std::vector<BamRead> GapFiller::recruitReadsFromBams(const Region& reg,
 
 std::vector<BamRead> GapFiller::recruitReadsOfType(const Region& reg, const std::string& type) const {
     std::vector<BamFile*> typedBams;
-    for (auto* bam : Pilon::bamFiles) {
+    for (auto* bam : BAMS()) {
         if (bam && bam->bamType() == type) typedBams.push_back(bam);
     }
     return recruitReadsFromBams(reg, typedBams);
@@ -332,7 +336,7 @@ std::vector<BamRead> GapFiller::recruitFrags(const Region& reg) const {
 
 std::vector<BamRead> GapFiller::recruitJumps(const Region& reg) const {
     std::vector<BamRead> reads;
-    for (auto* bam : Pilon::bamFiles) {
+    for (auto* bam : BAMS()) {
         if (bam && bam->bamType() == "jumps") {
             auto badMates = bam->recruitBadMates(reg);
             reads.insert(reads.end(), badMates.begin(), badMates.end());
@@ -362,14 +366,14 @@ std::vector<BamRead> GapFiller::recruitReads(const Region& brk) const {
 // =====================================================================
 std::tuple<int, std::string, std::string>
 GapFiller::doFixGap(GenomeRegion& region, const Region& gap) {
-    GapFiller filler(region);
+    GapFiller filler(region, region.bamHandles);
     k = 2 * Assembler::K + 1;
     return filler.fillGap(gap);
 }
 
 std::tuple<int, std::string, std::string>
 GapFiller::doFixBreak(GenomeRegion& region, const Region& brk) {
-    GapFiller filler(region);
+    GapFiller filler(region, region.bamHandles);
     k = 2 * Assembler::K + 1;
     return filler.fixBreak(brk);
 }
@@ -401,7 +405,7 @@ GapFiller::closeCircle(int estimatedLength) {
         Region fullRegion(region_.name, region_.start, region_.start + region_.size());
         reads = recruitReads(fullRegion);
     } else {
-        for (auto* bam : Pilon::bamFiles) {
+        for (auto* bam : BAMS()) {
             if (bam && bam->bamType() == "unpaired") {
                 auto leftReads = bam->readsInRegion(leftFlank);
                 auto rightReads = bam->readsInRegion(rightFlank);
@@ -478,7 +482,7 @@ GapFiller::closeCircle(int estimatedLength) {
 
 std::vector<std::tuple<int, std::string, std::string>>
 GapFiller::doCloseCircle(GenomeRegion& region, int estimatedLength) {
-    GapFiller filler(region);
+    GapFiller filler(region, region.bamHandles);
     return filler.closeCircle(estimatedLength);
 }
 

@@ -25,6 +25,7 @@
 #include <fstream>
 #include <iostream>
 #include <sstream>
+#include <cctype>
 #include <thread>
 #include <mutex>
 #include <atomic>
@@ -49,10 +50,12 @@ static void processChunk(const std::string& name,
                          std::atomic<int>& completedChunks,
                          int totalChunks) {
     std::vector<BamFile*> threadBams;
-    for (auto* bam : bamFiles) {
+    for (size_t i = 0; i < bamFiles.size(); i++) {
+        auto* bam = bamFiles[i];
         if (bam) {
             auto* threadBam = new BamFile(bam->path(), bam->bamType(), bam->subType());
             threadBam->open();
+            threadBam->shareScanState(*bam);
             threadBams.push_back(threadBam);
         }
     }
@@ -72,6 +75,7 @@ static void processChunk(const std::string& name,
                 region.fragCoverage_arr[i] += static_cast<int>(region.pileUpRegion(i).depth() - covBefore[i]);
         }
     }
+    region.bamHandles = &threadBams;
     region.postProcess();
     if (Pilon::fixSnps || Pilon::fixIndels || Pilon::fixGaps || Pilon::fixLocal) {
         region.identifyAndFixIssues();
@@ -441,6 +445,13 @@ void GenomeRegion::postProcess() {
             std::cerr << "WARNING: No reads processed in region " << name 
                       << ":" << start << "-" << stop << std::endl;
         }
+        computeGc();
+        computeCopyNumber();
+        // Initialize normal distributions with empty data to avoid null deref
+        std::vector<int> empty;
+        coverageDist.reset(new NormalDistribution(empty, 2));
+        fragCoverageDist.reset(new NormalDistribution(empty, 2));
+        pctBadOverall_ = 0;
         return;
     }
     
@@ -786,12 +797,25 @@ void GenomeRegion::identifyAndFixIssues() {
     if (Pilon::fixGaps) {
         auto gapRegions = gaps();
         if (!gapRegions.empty()) {
+            printf("  # Filling %zu gaps:\n", gapRegions.size());
+            int gapIdx = 0;
             for (const auto& gap : gapRegions) {
+                gapIdx++;
+                if (Pilon::verbose || gapIdx % 5 == 0 || gapIdx == 1) {
+                    printf("    gap %d/%zu: %s", gapIdx, gapRegions.size(), gap.toString().c_str());
+                }
                 auto fix = GapFiller::doFixGap(*this, gap);
                 int fixStart = std::get<0>(fix);
                 if (fixStart > 0) {
                     bigFixList.push_back(fix);
+                    if (Pilon::verbose || gapIdx % 5 == 0 || gapIdx == 1)
+                        printf(" -> %zubp patch", std::get<2>(fix).length());
+                } else {
+                    if (Pilon::verbose || gapIdx % 5 == 0 || gapIdx == 1)
+                        printf(" -> no solution");
                 }
+                if (Pilon::verbose || gapIdx % 5 == 0 || gapIdx == 1)
+                    printf("\n");
             }
         }
     }
@@ -815,16 +839,26 @@ void GenomeRegion::identifyAndFixIssues() {
             if (!nearGap) filteredBreaks.push_back(brk);
         }
         if (!filteredBreaks.empty()) {
+            printf("  # Fixing %zu breaks:\n", filteredBreaks.size());
+            int brkIdx = 0;
             for (const auto& brk : filteredBreaks) {
+                brkIdx++;
+                if (Pilon::verbose || brkIdx % 5 == 0 || brkIdx == 1)
+                    printf("    break %d/%zu: %s", brkIdx, filteredBreaks.size(), brk.toString().c_str());
                 auto fix = GapFiller::doFixBreak(*this, brk);
                 int fixStart = std::get<0>(fix);
                 const std::string& ref = std::get<1>(fix);
                 const std::string& patch = std::get<2>(fix);
                 if (fixStart > 0 && std::max(static_cast<int>(ref.length()), static_cast<int>(patch.length())) > 10) {
                     bigFixList.push_back(fix);
-                } else if (Pilon::verbose || fixStart == 0) {
-                    // Log no-solution
+                    if (Pilon::verbose || brkIdx % 5 == 0 || brkIdx == 1)
+                        printf(" -> %zubp patch", patch.length());
+                } else {
+                    if (Pilon::verbose || brkIdx % 5 == 0 || brkIdx == 1)
+                        printf(" -> no solution");
                 }
+                if (Pilon::verbose || brkIdx % 5 == 0 || brkIdx == 1)
+                    printf("\n");
             }
         }
     }
@@ -1021,7 +1055,10 @@ void GenomeFile::processRegions(std::vector<BamFile*>& bamFiles) {
             const std::string& seq = contig.second;
             int length = static_cast<int>(seq.size());
             std::cout << "Processing " << name << " (" << length << " bp)" << std::endl;
+            int numChunks = (length + Pilon::chunkSize - 1) / Pilon::chunkSize;
+            int chunkIdx = 0;
             for (int chunkStart = 0; chunkStart < length; chunkStart += Pilon::chunkSize) {
+                chunkIdx++;
                 int chunkStop = std::min(chunkStart + Pilon::chunkSize, length);
                 GenomeRegion region(name, chunkStart, chunkStop,
                                    seq.substr(chunkStart, chunkStop - chunkStart),
@@ -1041,6 +1078,7 @@ void GenomeFile::processRegions(std::vector<BamFile*>& bamFiles) {
                         }
                     }
                 }
+                region.bamHandles = &bamFiles;
                 region.postProcess();
                 if (Pilon::fixSnps || Pilon::fixIndels || Pilon::fixGaps || Pilon::fixLocal) {
                     region.identifyAndFixIssues();
@@ -1050,8 +1088,9 @@ void GenomeFile::processRegions(std::vector<BamFile*>& bamFiles) {
                 if (!Pilon::vcf) {
                     processedRegions_.back().freeMemory();
                 }
-                if (Pilon::verbose) {
-                    std::cout << "  Chunk " << chunkStart << "-" << chunkStop << " done" << std::endl;
+                if (Pilon::verbose || chunkIdx % 5 == 0 || chunkIdx == numChunks) {
+                    std::cout << "  [" << chunkIdx << "/" << numChunks << "] Chunk "
+                              << chunkStart << "-" << chunkStop << " done" << std::endl;
                 }
             }
         }
@@ -1098,9 +1137,32 @@ void GenomeFile::processRegions(std::vector<BamFile*>& bamFiles) {
     };
     for (int i = 0; i < numThreads; i++) workers.emplace_back(workerFunc);
     for (auto& t : workers) t.join();
+
+    // Natural sort comparator: "scaffold2" < "scaffold10"
+    auto naturalLess = [](const std::string& a, const std::string& b) -> bool {
+        size_t ai = 0, bi = 0;
+        while (ai < a.size() && bi < b.size()) {
+            if (std::isdigit(a[ai]) && std::isdigit(b[bi])) {
+                // Numeric segment: compare by value
+                size_t ae = ai, be = bi;
+                while (ae < a.size() && std::isdigit(a[ae])) ae++;
+                while (be < b.size() && std::isdigit(b[be])) be++;
+                unsigned long long na = std::stoull(a.substr(ai, ae - ai));
+                unsigned long long nb = std::stoull(b.substr(bi, be - bi));
+                if (na != nb) return na < nb;
+                ai = ae; bi = be;
+            } else {
+                // String segment: lexicographic
+                if (a[ai] != b[bi]) return a[ai] < b[bi];
+                ai++; bi++;
+            }
+        }
+        return a.size() < b.size();
+    };
+
     std::sort(processedRegions_.begin(), processedRegions_.end(),
-              [](const GenomeRegion& a, const GenomeRegion& b) {
-                  if (a.name != b.name) return a.name < b.name;
+              [&](const GenomeRegion& a, const GenomeRegion& b) {
+                  if (a.name != b.name) return naturalLess(a.name, b.name);
                   return a.start < b.start;
               });
     

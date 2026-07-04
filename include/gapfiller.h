@@ -17,7 +17,7 @@ public:
     static constexpr int minExtend = 20;
     static int k;
 
-    GapFiller(GenomeRegion& region);
+    GapFiller(GenomeRegion& region, std::vector<BamFile*>* bamHandles = nullptr);
 
     std::tuple<int, std::string, std::string> fillGap(const Region& gap);
     std::tuple<int, std::string, std::string> fixBreak(const Region& brk);
@@ -37,6 +37,7 @@ public:
 private:
     GenomeRegion& region_;
     std::string tandemRepeat_;
+    std::vector<BamFile*>* threadBams_;
     static const std::tuple<int, std::string, std::string> noSolution;
 
     // Close circle (matching Scala GapFiller.closeCircle)

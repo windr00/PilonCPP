@@ -55,8 +55,11 @@ public:
     int longReadType() const { return longReadType_; }
 
     // Open and validate the BAM file
-    bool open();
+    bool open(int ioThreads = 1);
     void close();
+
+    // Share scan results from parent handle (per-thread copies)
+    void shareScanState(const BamFile& parent);
 
     // Get sequence names from BAM header
     std::unordered_set<std::string> getSeqNames() const;
@@ -66,6 +69,9 @@ public:
 
     // Scan entire BAM for statistics
     void scan(const std::unordered_set<std::string>& seqsOfInterest);
+
+    // Estimate total reads from index (0 if unknown)
+    long long estimateTotalReads() const;
 
     // Get reads in a region
     std::vector<BamRead> readsInRegion(const Region& region) const;
@@ -185,6 +191,12 @@ private:
     };
 
     mutable StrayMateMap strayMateMap_;
+    const StrayMateMap* sharedStrayMap_ = nullptr;
+    const StrayMateMap& getStrayMap() const { return sharedStrayMap_ ? *sharedStrayMap_ : strayMateMap_; }
+
+    // Firehose suppression
+    BamFile(const BamFile&) = delete;
+    BamFile& operator=(const BamFile&) = delete;
 };
 
 } // namespace pilon

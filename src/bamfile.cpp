@@ -23,6 +23,7 @@
 #include <cmath>
 #include <cstring>
 #include <algorithm>
+#include <chrono>
 
 namespace pilon {
 
@@ -52,11 +53,16 @@ BamFile::~BamFile() {
     close();
 }
 
-bool BamFile::open() {
+bool BamFile::open(int ioThreads) {
     htsFile_ = hts_open(path_.c_str(), "rb");
     if (!htsFile_) {
         std::cerr << "Error: Cannot open BAM file: " << path_ << std::endl;
         return false;
+    }
+
+    if (ioThreads > 1) {
+        hts_set_threads(htsFile_, ioThreads);
+        hts_set_cache_size(htsFile_, Pilon::cacheSizeMb * 1024 * 1024);
     }
 
     header_ = sam_hdr_read(htsFile_);
@@ -93,6 +99,14 @@ void BamFile::close() {
         hts_close(htsFile_);
         htsFile_ = nullptr;
     }
+}
+
+void BamFile::shareScanState(const BamFile& parent) {
+    sharedStrayMap_ = &parent.strayMateMap_;      // pointer share, zero-copy
+    insertStatsFR_ = parent.insertStatsFR_;
+    insertStatsRF_ = parent.insertStatsRF_;
+    insertStatsUnpaired_ = parent.insertStatsUnpaired_;
+    bamType_ = parent.bamType_;
 }
 
 std::unordered_set<std::string> BamFile::getSeqNames() const {
@@ -227,7 +241,7 @@ static void addPileup(GenomeRegion& region, int locus, char base, int qual, int 
 
 // Helper: remove a base from pileup (matching Scala PileUpRegion.remove)
 // Scala: if (pair) { no-op } else { badPair-- }
-static void removePileup(GenomeRegion& region, int locus, char base, int qual, int mq, bool pair) {
+static void removePileup(GenomeRegion& region, int locus, char /*base*/, int /*qual*/, int /*mq*/, bool pair) {
     if (!region.inRegion(locus)) return;
     if (!pair) {
         region.pileUpRegion(region.index(locus)).badPair--;
@@ -518,6 +532,9 @@ double BamFile::process(GenomeRegion& region, int printInterval) {
 
     bam1_t* bam = bam_init1();
     int lastLoc = 0;
+    long long processedReads = 0;
+    auto pileStart = std::chrono::steady_clock::now();
+    auto pileLast = pileStart;
 
     int ret;
     while ((ret = sam_itr_next(htsFile_, iter, bam)) > 0) {
@@ -536,6 +553,30 @@ double BamFile::process(GenomeRegion& region, int printInterval) {
             bool rc = (bam->core.flag & BAM_FREVERSE) != 0;
             addInsert(insertSize, rc);
         }
+
+        processedReads++;
+        if (processedReads % 100000 == 0) {
+            auto now = std::chrono::steady_clock::now();
+            double recent = std::chrono::duration<double>(now - pileLast).count();
+            if (recent >= 2.0 && !Pilon::verbose) {
+                double elapsed = std::chrono::duration<double>(now - pileStart).count();
+                double readsPerSec = processedReads / elapsed;
+                printf("\r  pileup %s:%d-%d... %lld reads | %.1fM/s | elapsed %.1fs  ",
+                       region.name.c_str(), region.start, region.stop,
+                       (long long)processedReads, readsPerSec / 1e6, elapsed);
+                fflush(stdout);
+                pileLast = now;
+            }
+        }
+    }
+
+    // Clear progress line for non-verbose mode
+    if (!Pilon::verbose) {
+        auto pileEnd = std::chrono::steady_clock::now();
+        double elapsed = std::chrono::duration<double>(pileEnd - pileStart).count();
+        printf("\r  pileup %s:%d-%d... %lld reads in %.1fs\n",
+               region.name.c_str(), region.start, region.stop,
+               (long long)processedReads, elapsed);
     }
 
     if (ret < -1) {
@@ -548,15 +589,38 @@ double BamFile::process(GenomeRegion& region, int printInterval) {
     return 0;
 }
 
+long long BamFile::estimateTotalReads() const {
+    if (!index_ || !header_) return 0;
+    long long total = 0;
+    int nref = sam_hdr_nref(header_);
+    for (int tid = 0; tid < nref; tid++) {
+        uint64_t mapped = 0, unmapped = 0;
+        if (hts_idx_get_stat(index_, tid, &mapped, &unmapped) >= 0) {
+            total += static_cast<long long>(mapped);
+        }
+    }
+    if (total > 0) return total;
+    uint64_t noco = hts_idx_get_n_no_coor(index_);
+    return static_cast<long long>(noco);
+}
+
 void BamFile::scan(const std::unordered_set<std::string>& seqsOfInterest) {
     if (!htsFile_) {
         if (!open()) return;
     }
 
+    long long estTotal = estimateTotalReads();
+
+    auto startTime = std::chrono::steady_clock::now();
+    long long lastReport = 0;
+    auto lastTime = startTime;
+
     bam1_t* bam = bam_init1();
     int ret;
+    long long totalReads = 0;
 
     while ((ret = sam_read1(htsFile_, header_, bam)) > 0) {
+        totalReads++;
         if (!validateRead(bam)) {
             filtered_++;
         } else if (bam->core.flag & BAM_FUNMAP) {
@@ -583,11 +647,37 @@ void BamFile::scan(const std::unordered_set<std::string>& seqsOfInterest) {
                          (bam->core.flag & BAM_FREVERSE) != 0, true);
             }
         }
+
+        if (totalReads - lastReport >= 500000) {
+            auto now = std::chrono::steady_clock::now();
+            double recent = std::chrono::duration<double>(now - lastTime).count();
+            if (recent >= 2.0) {
+                double elapsed = std::chrono::duration<double>(now - startTime).count();
+                double readsPerSec = totalReads / elapsed;
+                if (estTotal > 0) {
+                    int pct = static_cast<int>(totalReads * 100 / estTotal);
+                    double eta = (estTotal - totalReads) / readsPerSec;
+                    printf("\r  Scanning %s... %d%% %lld/%lld reads | %.1fM/s | ETA %.1fs  ",
+                           path_.c_str(), pct, (long long)totalReads, (long long)estTotal,
+                           readsPerSec / 1e6, eta);
+                } else {
+                    printf("\r  Scanning %s... %lld reads | %.1fM/s | elapsed %.1fs  ",
+                           path_.c_str(), (long long)totalReads, readsPerSec / 1e6, elapsed);
+                }
+                fflush(stdout);
+                lastReport = totalReads;
+                lastTime = now;
+            }
+        }
     }
 
     bam_destroy1(bam);
 
-    long long totalReads = mapped_ + unmapped_ + filtered_;
+    auto endTime = std::chrono::steady_clock::now();
+    double elapsed = std::chrono::duration<double>(endTime - startTime).count();
+    printf("\r  Scanning %s... done (%lld reads in %.1fs)\n",
+           path_.c_str(), (long long)totalReads, elapsed);
+
     std::cout << path_ << ": " << totalReads << " reads, "
               << filtered_ << " filtered, "
               << mapped_ << " mapped, "
@@ -641,13 +731,13 @@ std::vector<BamRead> BamFile::recruitFlankReads(const Region& region) const {
         
         for (const auto& [name, read] : readMap1) {
             if (readMap2.find(name) == readMap2.end()) {
-                BamRead* mate = strayMateMap_.lookupMate(read);
+                BamRead* mate = getStrayMap().lookupMate(read);
                 if (mate) reads.push_back(*mate);
             }
         }
         for (const auto& [name, read] : readMap2) {
             if (readMap1.find(name) == readMap1.end()) {
-                BamRead* mate = strayMateMap_.lookupMate(read);
+                BamRead* mate = getStrayMap().lookupMate(read);
                 if (mate) reads.push_back(*mate);
             }
         }
@@ -673,13 +763,13 @@ std::vector<BamRead> BamFile::recruitBadMates(const Region& region) const {
     if (Pilon::strays) {
         for (const auto& [name, r] : readMap1) {
             if (readMap2.find(name) == readMap2.end()) {
-                BamRead* mate = strayMateMap_.lookupMate(*r);
+                BamRead* mate = getStrayMap().lookupMate(*r);
                 if (mate) readMap2[name] = mate;
             }
         }
         for (const auto& [name, r] : readMap2) {
             if (readMap1.find(name) == readMap1.end()) {
-                BamRead* mate = strayMateMap_.lookupMate(*r);
+                BamRead* mate = getStrayMap().lookupMate(*r);
                 if (mate) readMap1[name] = mate;
             }
         }

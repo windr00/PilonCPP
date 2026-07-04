@@ -65,6 +65,9 @@ struct GenomeRegion {
     std::vector<PileUp> pileUps;
     double minDepth;
 
+    // Thread-local BAM handles for GapFiller (set before identifyAndFixIssues)
+    std::vector<BamFile*>* bamHandles = nullptr;
+
     // Physical coverage tracking
     long long physCovStart;
     long long insertSizeStart;
