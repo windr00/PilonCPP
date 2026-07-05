@@ -23,6 +23,7 @@
 #include "bamfile.h"
 #include "utils.h"
 #include "bases.h"
+#include "scaffold.h"
 #include <iostream>
 #include <fstream>
 #include <algorithm>
@@ -57,7 +58,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Scan BAM files (matching Scala: scan before processing)
-    if (Pilon::strays || Pilon::fixCircles) {
+    if (Pilon::strays || Pilon::fixCircles || Pilon::fixScaffolds) {
         std::cout << "Scanning BAMs" << std::endl;
         auto contigs = genome.getContigs();
         std::unordered_set<std::string> seqsOfInterest;
@@ -65,6 +66,17 @@ int main(int argc, char* argv[]) {
         for (auto* bam : Pilon::bamFiles) {
             if (bam) bam->scan(seqsOfInterest);
         }
+    }
+
+    // Scaffold analysis (matching Scala Scaffold.analyze)
+    if (Pilon::fixScaffolds) {
+        Scaffold::analyze(Pilon::bamFiles);
+    }
+
+    // Circle detection (matching Scala findHgapCircles)
+    std::unordered_map<std::string, int> circles;
+    if (Pilon::fixCircles) {
+        circles = Scaffold::findHgapCircles(Pilon::bamFiles);
     }
 
     // fixNovel: assemble novel contigs before region processing
@@ -138,7 +150,7 @@ int main(int argc, char* argv[]) {
     for (const auto& region : regions) totalVcfPos += region.size();
     long long vcfPosDone = 0;
 
-    for (const auto& region : regions) {
+    for (auto& region : regions) {
         if (region.name != currentName) {
             // Write previous contig
             if (!currentName.empty() && fastaFile && fastaFile->is_open()) {
@@ -160,23 +172,9 @@ int main(int argc, char* argv[]) {
         }
         currentSeq += region.bases;
 
-        // Write VCF records for this region
+        // Write VCF records for this region (matching Scala GenomeRegion.writeVcf)
         if (vcf) {
-            // Write fix records for local reassembly (matching Scala writeFixRecord)
-            // Scala only writes for big fixes (reassembly), not pileup-based small indels
-            for (const auto& fix : region.fixes) {
-                const std::string& ref = std::get<1>(fix);
-                const std::string& patch = std::get<2>(fix);
-                // Big fix: involves large change or contains N (gap fill/break repair)
-                if (ref.length() >= 10 || patch.length() >= 10 ||
-                    ref.find('N') != std::string::npos || patch.find('N') != std::string::npos) {
-                    vcf->writeFixRecord(region, fix);
-                }
-            }
-            // Write per-position records
-            for (int i = 0; i < region.size(); i++) {
-                vcf->writeRecord(region, i, false, true);
-            }
+            region.writeVcf(vcf);
             vcfPosDone += region.size();
             if (totalVcfPos > 0 && vcfPosDone % 500000 < static_cast<long long>(region.size())) {
                 int pct = static_cast<int>(vcfPosDone * 100 / totalVcfPos);
@@ -185,16 +183,26 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // Write changes
+        // Write changes (matching Scala writeChanges format)
         if (changesFile && changesFile->is_open()) {
             int delta = 0;
             for (const auto& fix : region.fixes) {
-                int loc = std::get<0>(fix) + delta;
+                int origLoc = std::get<0>(fix);
+                int newLoc = origLoc + delta;
                 const std::string& from = std::get<1>(fix);
                 const std::string& to = std::get<2>(fix);
                 std::string fromDisplay = from.empty() ? "." : from;
                 std::string toDisplay = to.empty() ? "." : to;
-                (*changesFile) << region.name << "\t" << loc << "\t" << fromDisplay << "\t" << toDisplay << "\n";
+                // Scala format: oldRegion.regionString newRegion.regionString from to
+                int oldStart = origLoc + 1;
+                int oldStop  = origLoc + static_cast<int>(from.length());
+                int newStart = newLoc + 1;
+                int newStop  = newLoc + static_cast<int>(to.length());
+                (*changesFile) << region.name << ":" << oldStart;
+                if (from.size() > 1) (*changesFile) << "-" << oldStop;
+                (*changesFile) << " " << region.name << ":" << newStart;
+                if (to.size() > 1) (*changesFile) << "-" << newStop;
+                (*changesFile) << " " << fromDisplay << " " << toDisplay << "\n";
                 delta += static_cast<int>(to.length()) - static_cast<int>(from.length());
             }
         }
@@ -239,10 +247,9 @@ int main(int argc, char* argv[]) {
 
     // Output IGV tracks
     if (Pilon::tracks) {
-        std::string trackPrefix = Pilon::outputFile("");
         std::cout << "Writing tracks" << std::endl;
         for (auto& region : regions) {
-            region.writeTracks(trackPrefix);
+            region.writeTracks();
         }
     }
 

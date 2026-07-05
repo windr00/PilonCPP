@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.14)
-project(piloncpp VERSION 1.0.0 LANGUAGES CXX C)
+project(piloncpp VERSION 1.1.0 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -41,6 +41,7 @@ set(SOURCES
     src/normal.cpp
     src/bamfile.cpp
     src/utils.cpp
+    src/scaffold.cpp
     src/main.cpp
 )
 

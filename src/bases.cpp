@@ -105,7 +105,10 @@ const std::unordered_map<int, char>& Bases::getMapToIUPAC() {
 }
 
 char Bases::toIUPAC(char base1, char base2) {
-    int bits = bit(toIndex(base1)) | bit(toIndex(base2));
+    int i1 = toIndex(base1);
+    int i2 = toIndex(base2);
+    if (i1 < 0 || i2 < 0) return 'N';
+    int bits = bit(i1) | bit(i2);
     const auto& map = getMapToIUPAC();
     auto it = map.find(bits);
     if (it != map.end()) return it->second;

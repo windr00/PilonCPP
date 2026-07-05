@@ -60,6 +60,7 @@ struct GenomeRegion {
     int start;       // 0-based start
     int stop;        // 0-based stop (exclusive)
     std::string contigBases;
+    std::string fullContig_;   // Full contig sequence for GC sliding window (matching Scala)
     std::string originalBases;
     std::string bases;  // Fixed sequence (output)
     std::vector<PileUp> pileUps;
@@ -75,6 +76,15 @@ struct GenomeRegion {
     // Fix record: position, old sequence, new sequence
     using Fix = std::tuple<int, std::string, std::string>;
     std::vector<Fix> fixes;
+    // Classified fix lists for VCF writeFixRecord filtering (matching Scala)
+    std::vector<Fix> bigFixList_;
+    std::vector<Fix> smallFixList_;
+    // SNP fix list for VCF writeFixRecord filtering (matching Scala snpFixList)
+    std::vector<Fix> snpFixList_;
+    // Duplication events for VCF <DUP> records (matching Scala)
+    std::vector<Region> duplicationEvents_;
+    // Reassembly fixes for BED track (region -> outcome label)
+    std::vector<std::pair<Region, std::string>> reassemblyFixes_;
 
     // Read count tracking
     long long readCount;
@@ -133,7 +143,8 @@ struct GenomeRegion {
     int pctBadOverall_;
 
     GenomeRegion(const std::string& name, int start, int stop,
-                 const std::string& bases, double minDepth);
+                 const std::string& bases, const std::string& fullContig,
+                 double minDepth);
 
     int size() const;
     char baseAt(int pos) const;
@@ -167,7 +178,7 @@ struct GenomeRegion {
                      std::function<int(int)> valueFn, const std::string& extraOpts = "") const;
     void writeBed(FILE* writer, const std::string& name,
                   std::function<bool(int)> selectFn) const;
-    void writeTracks(const std::string& prefix) const;
+    void writeTracks() const;
 
     // Accessors for tracks
     int cov(int i) const { return i >= 0 && i < (int)coverage_arr.size() ? coverage_arr[i] : 0; }
@@ -182,6 +193,8 @@ struct GenomeRegion {
     int8_t gc(int i) const { return i >= 0 && i < (int)gc_arr.size() ? gc_arr[i] : 0; }
     bool isChanged(int i) const { return i >= 0 && i < (int)changed.size() ? changed[i] : false; }
     bool isAmbiguous(int i) const { return i >= 0 && i < (int)ambiguous.size() ? ambiguous[i] : false; }
+    bool isConfirmed(int i) const { return i >= 0 && i < (int)confirmed.size() ? confirmed[i] : true; }
+    bool isDeleted(int i) const { return i >= 0 && i < (int)deleted.size() ? deleted[i] : false; }
 
     // Core fixing logic
     void identifyAndFixIssues();
@@ -203,8 +216,18 @@ struct GenomeRegion {
     std::vector<Region> summaryRegions(std::function<bool(int)> positionTest, int slop = 100) const;
     std::vector<Region> gaps() const;
 
+    // BED classification methods (matching Scala)
+    std::vector<Region> changeRegions() const;
+    std::vector<Region> unConfirmedRegions() const;
+    std::vector<Region> lowCoverageRegions() const;
+    std::vector<Region> possibleCollapsedRepeats() const;
+    std::vector<Region> possibleBreaks() const;
+    // Write a list of regions as BED with label and RGB color
+    void regionsToBed(FILE* writer, const std::vector<Region>& regions,
+                      const std::string& label, const std::string& rgb) const;
+
     // Write methods
-    void writeVcf(FILE* writer) const;
+    void writeVcf(class Vcf* vcf);
     void writeChanges(FILE* writer, const std::string& newName, int& offset) const;
     
     // Free per-chunk memory after processing (pileups are not needed downstream)

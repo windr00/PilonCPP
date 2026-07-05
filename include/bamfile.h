@@ -64,6 +64,9 @@ public:
     // Get sequence names from BAM header
     std::unordered_set<std::string> getSeqNames() const;
 
+    // Get reference sequences with names and lengths (matching Scala bam.getSeqs)
+    std::vector<std::pair<std::string, int>> getRefNamesAndLengths() const;
+
     // Process reads in a region
     double process(GenomeRegion& region, int printInterval = 100000);
 
@@ -188,12 +191,31 @@ private:
             }
             return count * 2;
         }
+
+        // Get paired reads (matching Scala strayMateMap.pairs())
+        // Returns pairs where BOTH reads are present and r2 is second of pair
+        std::vector<std::pair<BamRead, BamRead>> pairs() const {
+            std::vector<std::pair<BamRead, BamRead>> result;
+            for (const auto& [name, r2] : readMap2) {
+                if (!r2.firstOfPair) {  // second of pair
+                    auto it = readMap1.find(name);
+                    if (it != readMap1.end()) {
+                        result.emplace_back(it->second, r2);
+                    }
+                }
+            }
+            return result;
+        }
     };
 
     mutable StrayMateMap strayMateMap_;
     const StrayMateMap* sharedStrayMap_ = nullptr;
+
+    // Public accessor for stray mate map (used by Scaffold module)
+public:
     const StrayMateMap& getStrayMap() const { return sharedStrayMap_ ? *sharedStrayMap_ : strayMateMap_; }
 
+private:
     // Firehose suppression
     BamFile(const BamFile&) = delete;
     BamFile& operator=(const BamFile&) = delete;

@@ -61,7 +61,7 @@ void Vcf::writeHeader(const std::vector<std::pair<std::string, int>>& contigsWit
 
     fprintf(writer_, "##fileformat=VCFv4.1\n");
     fprintf(writer_, "##fileDate=%s\n", date.c_str());
-    fprintf(writer_, "##source=\"PilonCpp 1.0.0\"\n");
+    fprintf(writer_, "##source=\"PilonCpp 1.1.0\"\n");
     fprintf(writer_, "##PILON=\"%s\"\n", cmdLine.c_str());
     fprintf(writer_, "##reference=%s\n", Pilon::genomePath.c_str());
 
@@ -261,7 +261,7 @@ void Vcf::writeFixRecord(const GenomeRegion& region, const GenomeRegion::Fix& fi
              "%s\t%d\t.\t%s\t%s\t.\tPASS\tSVTYPE=%s;SVLEN=%d;END=%d%s\tGT\t1/1",
              region.name.c_str(), loc + 1,  // VCF 1-based
              ref.c_str(), alt.c_str(),
-             svtype.c_str(), svlen, svend + 1,  // END is 1-based inclusive
+             svtype.c_str(), svlen, svend,  // END is 1-based inclusive
              fixContainsN(fix) ? ";IMPRECISE" : "");
 
     fprintf(writer_, "%s\n", buf);

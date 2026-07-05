@@ -18,7 +18,7 @@
 
 namespace pilon {
 
-int GapFiller::k = 0;
+int GapFiller::k = 2 * Assembler::K + 1;
 const std::tuple<int, std::string, std::string> GapFiller::noSolution = {0, "", ""};
 
 GapFiller::GapFiller(GenomeRegion& region, std::vector<BamFile*>* bamHandles)
@@ -72,12 +72,9 @@ GapFiller::trimPatch(int startArg, const std::string& patchArg, int stopArg) {
         patch = patch.substr(0, patch.length() - 1);
     }
 
-    // Build reference string for this range
+    // Build reference string for this range (matching Scala: region.refSubString(start, stop-start))
     int refLen = stop - start;
-    std::string ref(refLen, 'N');
-    for (int i = 0; i < refLen; i++) {
-        ref[i] = region_.baseAt(start + i);
-    }
+    std::string ref = region_.refSubString(start, refLen);
     return {start, ref, patch};
 }
 
@@ -296,15 +293,16 @@ std::tuple<int, std::string, std::string> GapFiller::fixBreak(const Region& brk)
 // =====================================================================
 int GapFiller::breakRadius() const {
     int minRadius = 3 * Assembler::K;
-    int insertMean = 0;
+    double totalInsert = 0.0;
     int count = 0;
     for (auto* bam : BAMS()) {
         if (bam && bam->bamType() == "frags") {
-            insertMean += (int)bam->insertSizeMean();
+            totalInsert += bam->insertSizeMean();
             count++;
         }
     }
-    if (count > 0) insertMean = static_cast<int>(std::round(static_cast<double>(insertMean) / count));
+    int insertMean = 0;
+    if (count > 0) insertMean = static_cast<int>(std::round(totalInsert / count));
     return std::max(minRadius, insertMean);
 }
 
@@ -388,7 +386,7 @@ GapFiller::closeCircle(int estimatedLength) {
     int trimToLength = (estimatedLength > 0) ? estimatedLength : region_.size() / 2;
     int trimFlanks = std::max((region_.size() - trimToLength) / 2, 0);
     int rightEnd = region_.start + trimFlanks;
-    Region rightFlank(region_.name, rightEnd, rightEnd + breakRadius());
+    Region rightFlank(region_.name, rightEnd, rightEnd + breakRadius() + 1);
     int leftEnd = region_.start + region_.size() - trimFlanks;
     Region leftFlank(region_.name, leftEnd - breakRadius(), leftEnd);
     
@@ -466,8 +464,8 @@ GapFiller::closeCircle(int estimatedLength) {
         int rightLen = trimFlanks + breakRadius();
         std::vector<std::tuple<int, std::string, std::string>> solutions;
         
-        solutions.push_back({region_.start + 1,
-                              region_.subString(region_.start + 1, rightLen),
+        solutions.push_back({region_.start,
+                              region_.subString(region_.start, rightLen),
                               ""});
         
         auto leftSolution = trimPatch(leftFlank.start, patch, region_.start + region_.size());

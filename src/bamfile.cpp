@@ -82,6 +82,11 @@ bool BamFile::open(int ioThreads) {
     if (Utils::fileExists(indexPath)) {
         index_ = hts_idx_load2(path_.c_str(), indexPath.c_str());
     }
+    
+    if (!index_) {
+        std::cerr << "Error: BAM file " << path_ << " does not appear to have an index (.bai or .csi)" << std::endl;
+        exit(1);
+    }
 
     return true;
 }
@@ -121,6 +126,18 @@ std::unordered_set<std::string> BamFile::getSeqNames() const {
         }
     }
     return names;
+}
+
+std::vector<std::pair<std::string, int>> BamFile::getRefNamesAndLengths() const {
+    std::vector<std::pair<std::string, int>> result;
+    if (!header_) return result;
+    int nseq = sam_hdr_nref(header_);
+    for (int i = 0; i < nseq; i++) {
+        const char* name = sam_hdr_tid2name(header_, i);
+        uint32_t len = sam_hdr_tid2len(header_, i);
+        if (name) result.emplace_back(name, static_cast<int>(len));
+    }
+    return result;
 }
 
 // Helper: check if mate is unmapped
@@ -260,7 +277,8 @@ static int physCovIncr(GenomeRegion& region, int aStart, int aEnd, int iSize, bo
         start = aStart;
         end = aStart + iSize;
     } else {
-        end = aEnd + 1;
+        // aEnd from bam_endpos is already 0-based exclusive, no +1 needed (matching Scala)
+        end = aEnd;
         start = end + iSize; // iSize is negative
     }
     
@@ -283,9 +301,9 @@ static int physCovIncr(GenomeRegion& region, int aStart, int aEnd, int iSize, bo
 }
 
 // Core: process a single read and add to pileups (matching Scala PileUpRegion.addRead)
-static void addReadToPileup(GenomeRegion& region, const bam1_t* bam, int longReadType) {
+static int addReadToPileup(GenomeRegion& region, const bam1_t* bam, int longReadType) {
     int length = bam->core.l_qseq;
-    if (length == 0) return;
+    if (length == 0) return 0;
 
     const uint8_t* quals = bam_get_qual(bam);
     int mq = bam->core.qual;
@@ -370,7 +388,7 @@ static void addReadToPileup(GenomeRegion& region, const bam1_t* bam, int longRea
                     // refBases(iloc - 2) in 1-based = refBase(iloc - 2) in 0-based
                     int iloc = locus;
                     while (iloc > 0 && region.inRegion(iloc - 1) &&
-                           region.refBase(iloc - 1) == baseChars[readOffset + len - 1]) {
+                           region.refBase(iloc - 1) == static_cast<char>(insertion.back())) {
                         iloc--;
                         // Rotate insertion
                         char last = insertion.back();
@@ -509,7 +527,8 @@ static void addReadToPileup(GenomeRegion& region, const bam1_t* bam, int longRea
     }
     
     region.readCount++;
-    physCovIncr(region, aStart, aEnd, insert, paired, valid);
+    int insertSz = physCovIncr(region, aStart, aEnd, insert, paired, valid);
+    return insertSz;
 }
 
 double BamFile::process(GenomeRegion& region, int printInterval) {
@@ -522,11 +541,13 @@ double BamFile::process(GenomeRegion& region, int printInterval) {
 
     hts_itr_t* iter = nullptr;
     if (index_) {
-        iter = sam_itr_queryi(index_, tid, std::max(0, region.start - 10000),
-                              region.stop + 10000);
+        int contigLen = sam_hdr_tid2len(header_, tid);
+        int queryStop = std::min(region.stop + 10000, contigLen);
+        iter = sam_itr_queryi(index_, tid, std::max(0, region.start - 10000), queryStop);
     } else {
-        iter = sam_itr_queryi(nullptr, tid, std::max(0, region.start - 10000),
-                              region.stop + 10000);
+        int contigLen = sam_hdr_tid2len(header_, tid);
+        int queryStop = std::min(region.stop + 10000, contigLen);
+        iter = sam_itr_queryi(nullptr, tid, std::max(0, region.start - 10000), queryStop);
     }
     if (!iter) return 0;
 
@@ -545,13 +566,9 @@ double BamFile::process(GenomeRegion& region, int printInterval) {
         }
 
         if (validateRead(bam)) {
-            // Add read to pileup with full CIGAR parsing
-            addReadToPileup(region, bam, longReadType_);
-            
-            // Track insert size statistics
-            int insertSize = bam->core.isize;
+            int computedInsert = addReadToPileup(region, bam, longReadType_);
             bool rc = (bam->core.flag & BAM_FREVERSE) != 0;
-            addInsert(insertSize, rc);
+            addInsert(computedInsert, rc);
         }
 
         processedReads++;
@@ -586,7 +603,15 @@ double BamFile::process(GenomeRegion& region, int printInterval) {
     hts_itr_destroy(iter);
     bam_destroy1(bam);
 
-    return 0;
+    // Compute mean coverage for this region (matching Scala return value)
+    double meanCoverage = 0.0;
+    if (region.size() > 0) {
+        long long totalCov = 0;
+        for (int i = 0; i < region.size(); i++)
+            totalCov += region.pileUpRegion(i).depth();
+        meanCoverage = static_cast<double>(totalCov) / region.size();
+    }
+    return meanCoverage;
 }
 
 long long BamFile::estimateTotalReads() const {
@@ -710,15 +735,23 @@ void BamFile::scan(const std::unordered_set<std::string>& seqsOfInterest) {
 }
 
 std::vector<BamRead> BamFile::readsInRegion(const Region& region) const {
-    return queryRegion(htsFile_, header_, index_, region.name, region.start, region.stop);
+    auto reads = queryRegion(htsFile_, header_, index_, region.name, region.start, region.stop);
+    // Filter reads matching Scala validateRead (QC-fail, duplicate, secondary alignment)
+    reads.erase(std::remove_if(reads.begin(), reads.end(),
+        [](const BamRead& r) {
+            return (!Pilon::nonPf && r.failsVendorQC) ||
+                   (!Pilon::duplicates && r.duplicate) ||
+                   r.secondary;
+        }), reads.end());
+    return reads;
 }
 
 std::vector<BamRead> BamFile::recruitFlankReads(const Region& region) const {
     Region flanks = flankRegion(region);
     std::vector<BamRead> reads = readsInRegion(flanks);
     
-    // Handle stray mates if Pilon::strays is set
-    if (Pilon::strays) {
+    // Handle stray mates if Pilon::strays is set (matching Scala: if (bamType != "unpaired"))
+    if (Pilon::strays && bamType_ != "unpaired") {
         std::unordered_map<std::string, BamRead> readMap1;
         std::unordered_map<std::string, BamRead> readMap2;
         for (const auto& r : reads) {
@@ -805,6 +838,33 @@ std::vector<BamRead> BamFile::recruitBadMates(const Region& region) const {
         if (goodOrientation && ((flanks.start <= start && start < flanks.stop) ||
                                  (flanks.start <= end && end < flanks.stop)))
             mates.push_back(r2);
+    }
+
+    // Reverse pass: second-of-pair as anchor (matching Scala pairs() which emits both orders)
+    for (const auto& [name, r2] : readMap2) {
+        auto it = readMap1.find(name);
+        if (it == readMap1.end()) continue;
+        const auto& r1 = *it->second;
+
+        if (r2->unmapped || r2->properPair) continue;
+        
+        const auto& r = *r2;  // the anchored read (second of pair)
+        bool rc = r.negativeStrand;
+        int start = r.alignmentStart;
+        int end = r.alignmentEnd;
+        bool before = start < midpoint;
+        bool after = end > midpoint;
+
+        bool frOrientation = (before && !rc) || (after && rc);
+
+        bool goodOrientation;
+        if (frPctVal > 100 - minOrientationPct) goodOrientation = frOrientation;
+        else if (frPctVal < minOrientationPct) goodOrientation = !frOrientation;
+        else goodOrientation = true;
+
+        if (goodOrientation && ((flanks.start <= start && start < flanks.stop) ||
+                                 (flanks.start <= end && end < flanks.stop)))
+            mates.push_back(r1);  // the other read (first of pair)
     }
 
     return mates;
@@ -942,8 +1002,8 @@ void BamFile::InsertSizeStats::reset() {
 }
 
 int BamFile::InsertSizeStats::maxInsertSize() const {
-    if (count < 1000) return 0;
-    return static_cast<int>(mean() + 3.0 * sigma());
+    if (count <= 1000) return 0;
+    return static_cast<int>(std::round(mean() + 3.0 * sigma()));
 }
 
 std::string BamFile::InsertSizeStats::toString() const {
