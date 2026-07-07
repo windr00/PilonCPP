@@ -59,6 +59,7 @@ public:
     static bool vcf;
     static bool vcfQE;
     static bool debug;
+    static bool compact;
 
     // Heuristics and control parameters
     static int chunkSize;

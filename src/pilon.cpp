@@ -81,6 +81,7 @@ std::vector<std::string> Pilon::novelContigs;
 
 int Pilon::threads = 1;
 int Pilon::scanThreads = 0;
+bool Pilon::compact = false;
 int Pilon::cacheSizeMb = 256;
 
 std::vector<std::string> Pilon::commandArgs;
@@ -160,7 +161,7 @@ std::string Pilon::outputFile(const std::string& name) {
 
 void Pilon::printUsage() {
     std::cerr << std::endl;
-    std::cerr << "PilonCpp version 1.1.0" << std::endl;
+    std::cerr << "PilonCpp version 1.1.1" << std::endl;
     std::cerr << std::endl;
     std::cerr << "    Usage: piloncpp --genome genome.fasta [--frags frags.bam] [--jumps jumps.bam] [--unpaired unpaired.bam]" << std::endl;
     std::cerr << "                 [...other options...]" << std::endl;
@@ -254,11 +255,14 @@ void Pilon::printHelp() {
            --cache-mb
               Read-ahead cache size in MB for BAM scanning (default: 256). Increase for
               mechanical drives or network filesystems to reduce seek overhead.
-           --verbose
-              More verbose output.
-           --debug
-              Debugging output (implies verbose).
-           --version
+            --verbose
+               More verbose output.
+            --debug
+               Debugging output (implies verbose).
+            --compact
+               Show compact single-line progress for gap/break fixing and chunk processing
+               instead of per-item detail lines. Useful for large datasets.
+            --version
               Print version string and exit.
            --help, -h
               Show this help message.
@@ -343,6 +347,7 @@ void Pilon::parseOptions(int argc, char* argv[]) {
         {"threads",       required_argument, 0, 1},
         {"scan-threads",  required_argument, 0, 4},
         {"cache-mb",      required_argument, 0, 5},
+        {"compact",       no_argument,       0, 6},
         {"help",          no_argument,       0, 'h'},
         {0, 0, 0, 0}
     };
@@ -423,8 +428,9 @@ void Pilon::parseOptions(int argc, char* argv[]) {
             case 1:   threads = std::stoi(optarg); break;
             case 4:   scanThreads = std::stoi(optarg); break;
             case 5:   cacheSizeMb = std::stoi(optarg); break;
+            case 6:   compact = true; break;
             case 3:
-                std::cout << "PilonCpp version 1.1.0" << std::endl;
+                std::cout << "PilonCpp version 1.1.1" << std::endl;
                 exit(0);
             case 'h':
                 printHelp();

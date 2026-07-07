@@ -23,6 +23,7 @@
 #include "gapfiller.h"
 #include "bamfile.h"
 #include "gapfiller.h"
+#include <algorithm>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -567,14 +568,15 @@ void GenomeRegion::writeTracks() const {
 void GenomeRegion::postProcess() {
     computePhysCov();
     
-    // Compute meanCoverage
+    // Compute meanCoverage (matching Scala: roundDiv(baseCount, size))
     int meanCoverage = 0;
     if (!pileUps.empty()) {
-        long long totalDepth = 0;
+        long long totalBaseCount = 0;
         for (const auto& pu : pileUps) {
-            totalDepth += pu.depth();
+            totalBaseCount += pu.baseCount.sum();
         }
-        meanCoverage = static_cast<int>(totalDepth / pileUps.size());
+        long long d = static_cast<long long>(pileUps.size());
+        meanCoverage = static_cast<int>((totalBaseCount + d / 2) / d);
     }
     
     // Compute minDepth (matching Scala postProcess logic)
@@ -948,11 +950,21 @@ void GenomeRegion::identifyAndFixIssues() {
     if (Pilon::fixGaps) {
         auto gapRegions = gaps();
         if (!gapRegions.empty()) {
-            printf("  # Filling %zu gaps:\n", gapRegions.size());
+            if (Pilon::compact) {
+                printf("  # Filling %zu gaps: ...", gapRegions.size());
+                fflush(stdout);
+            } else {
+                printf("  # Filling %zu gaps:\n", gapRegions.size());
+            }
             int gapIdx = 0;
             for (const auto& gap : gapRegions) {
                 gapIdx++;
-                if (Pilon::verbose || gapIdx % 5 == 0 || gapIdx == 1) {
+                bool showDetail = (Pilon::verbose && !Pilon::compact) || (!Pilon::compact && (gapIdx % 5 == 0 || gapIdx == 1));
+                if (Pilon::compact && gapIdx % 5 == 0) {
+                    printf("\r  # Filling gaps: %d/%zu  ", gapIdx, gapRegions.size());
+                    fflush(stdout);
+                }
+                if (showDetail) {
                     printf("    gap %d/%zu: %s", gapIdx, gapRegions.size(), gap.toString().c_str());
                 }
                 auto fix = GapFiller::doFixGap(*this, gap);
@@ -961,13 +973,13 @@ void GenomeRegion::identifyAndFixIssues() {
                 const std::string& patch = std::get<2>(fix);
                 if (fixStart > 0) {
                     bigFixList.push_back(fix);
-                    if (Pilon::verbose || gapIdx % 5 == 0 || gapIdx == 1)
+                    if (showDetail)
                         printf(" -> %zubp patch", patch.length());
                 } else {
-                    if (Pilon::verbose || gapIdx % 5 == 0 || gapIdx == 1)
+                    if (showDetail)
                         printf(" -> no solution");
                 }
-                if (Pilon::verbose || gapIdx % 5 == 0 || gapIdx == 1)
+                if (showDetail)
                     printf("\n");
                 // Populate reassemblyFixes_ (matching Scala logFix)
                 {
@@ -981,6 +993,9 @@ void GenomeRegion::identifyAndFixIssues() {
                     else msg = "Unknown!";
                     reassemblyFixes_.push_back({gap, msg});
                 }
+            }
+            if (Pilon::compact) {
+                printf("\r  # Filling gaps: %zu/%zu done\n", gapRegions.size(), gapRegions.size());
             }
         }
     }
@@ -1004,11 +1019,21 @@ void GenomeRegion::identifyAndFixIssues() {
             if (!nearGap) filteredBreaks.push_back(brk);
         }
         if (!filteredBreaks.empty()) {
-            printf("  # Fixing %zu breaks:\n", filteredBreaks.size());
+            if (Pilon::compact) {
+                printf("  # Fixing %zu breaks: ...", filteredBreaks.size());
+                fflush(stdout);
+            } else {
+                printf("  # Fixing %zu breaks:\n", filteredBreaks.size());
+            }
             int brkIdx = 0;
             for (const auto& brk : filteredBreaks) {
                 brkIdx++;
-                if (Pilon::verbose || brkIdx % 5 == 0 || brkIdx == 1)
+                bool showDetail = (Pilon::verbose && !Pilon::compact) || (!Pilon::compact && (brkIdx % 5 == 0 || brkIdx == 1));
+                if (Pilon::compact && brkIdx % 5 == 0) {
+                    printf("\r  # Fixing breaks: %d/%zu  ", brkIdx, filteredBreaks.size());
+                    fflush(stdout);
+                }
+                if (showDetail)
                     printf("    break %d/%zu: %s", brkIdx, filteredBreaks.size(), brk.toString().c_str());
                 auto fix = GapFiller::doFixBreak(*this, brk);
                 int fixStart = std::get<0>(fix);
@@ -1016,13 +1041,13 @@ void GenomeRegion::identifyAndFixIssues() {
                 const std::string& patch = std::get<2>(fix);
                 if (fixStart > 0 && std::max(static_cast<int>(ref.length()), static_cast<int>(patch.length())) > 10) {
                     bigFixList.push_back(fix);
-                    if (Pilon::verbose || brkIdx % 5 == 0 || brkIdx == 1)
+                    if (showDetail)
                         printf(" -> %zubp patch", patch.length());
                 } else {
-                    if (Pilon::verbose || brkIdx % 5 == 0 || brkIdx == 1)
+                    if (showDetail)
                         printf(" -> no solution");
                 }
-                if (Pilon::verbose || brkIdx % 5 == 0 || brkIdx == 1)
+                if (showDetail)
                     printf("\n");
                 // Populate reassemblyFixes_ (matching Scala logFix)
                 {
@@ -1037,6 +1062,9 @@ void GenomeRegion::identifyAndFixIssues() {
                     else msg = "Unknown!";
                     reassemblyFixes_.push_back({brk, msg});
                 }
+            }
+            if (Pilon::compact) {
+                printf("\r  # Fixing breaks: %zu/%zu done\n", filteredBreaks.size(), filteredBreaks.size());
             }
         }
     }

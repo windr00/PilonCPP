@@ -61,7 +61,7 @@ void Vcf::writeHeader(const std::vector<std::pair<std::string, int>>& contigsWit
 
     fprintf(writer_, "##fileformat=VCFv4.1\n");
     fprintf(writer_, "##fileDate=%s\n", date.c_str());
-    fprintf(writer_, "##source=\"PilonCpp 1.1.0\"\n");
+    fprintf(writer_, "##source=\"PilonCpp 1.1.1\"\n");
     fprintf(writer_, "##PILON=\"%s\"\n", cmdLine.c_str());
     fprintf(writer_, "##reference=%s\n", Pilon::genomePath.c_str());
 

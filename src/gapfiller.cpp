@@ -84,24 +84,29 @@ GapFiller::trimPatch(int startArg, const std::string& patchArg, int stopArg) {
 std::vector<std::tuple<int, std::string, std::string>>
 GapFiller::breakJoins(int start, const std::vector<std::string>& forwardPaths,
                       const std::vector<std::string>& reversePaths, int stop) {
-    std::set<std::tuple<int, std::string, std::string>> solutionSet;
+    // Use vector with manual dedup to preserve insertion order (matching Scala's Set insertion order)
+    std::vector<std::tuple<int, std::string, std::string>> solutions;
+    auto insertSolution = [&](const auto& s) {
+        for (const auto& existing : solutions) {
+            if (existing == s) return;
+        }
+        solutions.push_back(s);
+    };
 
     for (const auto& f : forwardPaths) {
         for (const auto& r : reversePaths) {
             auto s = joinBreak(start, f, r, stop);
             if (s != noSolution) {
-                solutionSet.insert(s);
+                insertSolution(s);
             }
         }
     }
 
-    // Sort by total change length
-    std::vector<std::tuple<int, std::string, std::string>> solutions(
-        solutionSet.begin(), solutionSet.end());
-    std::sort(solutions.begin(), solutions.end(),
+    // Stable sort by total change length — insertion order preserved for ties (matches Scala Set2)
+    std::stable_sort(solutions.begin(), solutions.end(),
               [](const auto& a, const auto& b) {
-                  return std::get<2>(a).length() + std::get<1>(a).length()
-                       < std::get<2>(b).length() + std::get<1>(b).length();
+                  return std::get<2>(a).length() + std::get<1>(a).length() <
+                         std::get<2>(b).length() + std::get<1>(b).length();
               });
 
     // If all solutions have the same delta length, return only the smallest total
@@ -209,6 +214,13 @@ bool GapFiller::partialMatchesReference(int start, const std::string& fromLeft,
 // =====================================================================
 std::tuple<int, std::vector<std::string>, std::vector<std::string>, int, std::string>
 GapFiller::assembleIntoBreak(const Region& brk, const std::vector<BamRead>& reads) {
+    int startOffset = breakRadius();
+    int start = std::max(region_.start, brk.start - startOffset);
+    int stop  = std::min(region_.start + region_.size(), brk.stop + startOffset);
+
+    std::string left  = region_.subString(start, brk.start - start);
+    std::string right = region_.subString(brk.stop, stop - brk.stop);
+
     Assembler assembler;
     assembler.addReads(reads);
     assembler.buildGraph();
@@ -217,14 +229,8 @@ GapFiller::assembleIntoBreak(const Region& brk, const std::vector<BamRead>& read
         assembler.addGraphSeqs(Pilon::novelContigs);
     }
 
-    int startOffset = breakRadius();
-    int start = std::max(region_.start, brk.start - startOffset);
-    int stop  = std::min(region_.start + region_.size(), brk.stop + startOffset);
-
-    std::string left  = region_.subString(start, brk.start - start);
-    std::string right = region_.subString(brk.stop, stop - brk.stop);
-
     auto [forward, reverse, loop] = assembler.multiBridge(left, right);
+
     return {start, forward, reverse, stop, loop};
 }
 
