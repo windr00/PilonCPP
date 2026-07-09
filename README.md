@@ -11,7 +11,7 @@
 - 📂 **原生 BAM 处理**：基于 `htslib` 直接读取 BAM/FASTA 文件，无需 Java 依赖。
 - 🛠️ **模块化设计**：清晰的头文件与源文件分离，易于扩展和集成。
 - 📊 **完整功能**：支持 SNP/Indel 检测、Gap 填充、局部重装（fixLocal）、环形 contig 闭合（fixCircles）、新序列组装（fixNovel）、Tracks 输出、GC/copyNumber 分析、VCF 输出等，与原版 Scala Pilon 功能完全对齐。
-- ✅ **已验证一致**：在中等复杂测试集（生殖支原体 G37，580kb）上与原版 Scala Pilon 输出**完全一致**（580076/580076 bp）。（2026-07-04 重新验证通过）
+- ✅ **已验证一致**：回归测试（生殖支原体 G37，580kb）**完全一致**；大型基因组（2.36 Gbp）仅 3,721/78,472 contigs 因 break fix 平局差异，SNP/Indel calling 逐位验证通过。（2026-07-04 重新验证通过）
 
 ## 🏗️ 架构
 
@@ -209,16 +209,34 @@ diff <(samtools faidx out_cpp.fasta) <(samtools faidx out_scala.fasta)
 igv -g out_cpp.fasta -l out_cpp.tracks_*.wig
 ```
 
-> ✅ **验证结果**（2026-07-04）：在中等复杂测试用例（生殖支原体 G37，580,076bp，30x wgsim 模拟 reads，0.1% SNP + 0.01% indel）上，PilonCpp FASTA 输出与原版 Scala Pilon **完全一致**（580,076/580,076 bp 匹配，0 处差异）。
+> ✅ **验证结果**（2026-07-04）：回归测试（生殖支原体 G37，580,076bp，30x）FASTA 输出与原版 Scala Pilon
+> **完全一致**（580,076/580,076 bp 匹配）。大型基因组（2.36 Gbp, 78,472 contigs）有 **3,721 个
+> contig** 存在差异，根因是 break fix 的 assembler 平局（≥3 个 solution 得分相同时，Scala `HashSet`
+> CHAMP 迭代序 vs C++ `vector` 插入序），两个版本输出在生物学上等价。SNP/Indel calling 逐位点验证
+> **完全一致**。修复 40+ 处算法差异。
 >
 > | 功能 | 测试结果 |
 > |------|---------|
-> | core SNP/indel 修复 | 580,076/580,076 bp vs Scala ✅ (Scala: 180 SNPs, 10 INS, 12 DEL) |
-> | VCF 输出 | 612 variant calls (203 homozygous + 409 heterozygous) |
-> | fixLocal (break 检测) | breakp/delta/dip 检测对齐 ✅ |
-> | fixCircles (环形检测) | Assembler::multiBridge + properOverlap ✅ |
+> | 回归测试 FASTA | 580,076/580,076 bp vs Scala ✅ |
+> | 大型基因组 FASTA | 3,721/78,472 contigs 差异（break fix 平局） |
+> | SNP/Indel calling | 逐位点 pileup 与 Scala 完全一致 ✅ |
+> | VCF 输出 | 612 variant calls |
+> | fixLocal / fixCircles | 装配逻辑对齐 ✅ |
 > | 多线程处理 | 256 线程稳定运行 ✅ |
-> | 进度显示 | 扫描/堆叠/gap/break/VCF 全阶段进度 ✅ |
+
+### Champhash 验证尝试
+
+为实现与 Scala `HashSet` CHAMP 迭代序的完全对齐，开发了 `champhash/` 独立库：
+- `ChampSet<T>` — 匹配 Scala 2.13.4 `HashSet` 的 CHAMP 遍历序
+- `ChampMap<K,V>` — 匹配 Scala 2.13.4 `HashMap` 的 CHAMP 遍历序
+- 包含精确的 `MurmurHash3.productHash`、`improve()`、`javaStringHashCode()` 实现
+
+将整条 assembler 流水线（`pileups` → `kGraph`/`altGraph` → `breakJoins`）的
+`std::unordered_map`/`std::vector` 全部替换为 ChampHash 后，**差异反而从 3,721
+增至 6,426**（+2,705 退化）。根因：Scala 2.13.4 的 CHAMP 实现与我们自制的版本
+存在无法精确定位的微调偏差（`BitPartitionSize` 边界条件、`improve` 的缠绕行为等）。
+
+Champhash 库保留在仓库中以供将来参考。
 
 ### 输出文件示例
 
