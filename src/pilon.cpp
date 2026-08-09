@@ -161,7 +161,7 @@ std::string Pilon::outputFile(const std::string& name) {
 
 void Pilon::printUsage() {
     std::cerr << std::endl;
-    std::cerr << "PilonCpp version 1.2.0" << std::endl;
+    std::cerr << "PilonCpp version 1.2.1" << std::endl;
     std::cerr << std::endl;
     std::cerr << "    Usage: piloncpp --genome genome.fasta [--frags frags.bam] [--jumps jumps.bam] [--unpaired unpaired.bam]" << std::endl;
     std::cerr << "                 [...other options...]" << std::endl;
@@ -430,7 +430,7 @@ void Pilon::parseOptions(int argc, char* argv[]) {
             case 5:   cacheSizeMb = std::stoi(optarg); break;
             case 6:   compact = true; break;
             case 3:
-                std::cout << "PilonCpp version 1.2.0" << std::endl;
+                std::cout << "PilonCpp version 1.2.1" << std::endl;
                 exit(0);
             case 'h':
                 printHelp();

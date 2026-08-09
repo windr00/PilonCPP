@@ -248,6 +248,10 @@ struct GenomeRegion {
         weightedQual_arr.clear();
         weightedMq_arr.clear();
         homoRunLen_.clear();
+        // Full contig sequence is only needed for the GC sliding window during
+        // postProcess; it is dead weight once per-chunk processing finishes.
+        fullContig_.clear();
+        fullContig_.shrink_to_fit();
     }
 
 private:

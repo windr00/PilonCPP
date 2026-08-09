@@ -86,6 +86,11 @@ static void processChunk(const std::string& name,
     {
         std::lock_guard<std::mutex> lock(resultsMutex);
         results.push_back(std::move(region));
+        // Free per-chunk memory immediately (matching single-threaded mode),
+        // unless VCF output needs the pileups later.
+        if (!Pilon::vcf) {
+            results.back().freeMemory();
+        }
     }
     int done = ++completedChunks;
     if (Pilon::verbose || done % 10 == 0 || done == totalChunks) {
@@ -1282,7 +1287,9 @@ std::vector<std::pair<std::string, std::string>> GenomeFile::parseTargets() {
     return result;
 }
 void GenomeFile::processRegions(std::vector<BamFile*>& bamFiles) {
-    auto contigs = targets_.empty() ? contigs_ : parseTargets();
+    // Reference (no copy) into the member contigs when no targets are given;
+    // parseTargets() returns a fresh vector that outlives this call either way.
+    const auto& contigs = targets_.empty() ? contigs_ : parseTargets();
     int numThreads = Pilon::threads;
     if (numThreads <= 1) {
         for (const auto& contig : contigs) {
@@ -1334,7 +1341,10 @@ void GenomeFile::processRegions(std::vector<BamFile*>& bamFiles) {
     }
     // Multi-threaded mode
     std::cout << "Using " << numThreads << " threads for processing" << std::endl;
-    struct ChunkTask { std::string name; std::string seq; int chunkStart; int chunkStop; };
+    // Pointers into `contigs` (stable for the whole function lifetime); avoids
+    // copying the full contig sequence once per chunk. Region objects still
+    // own their own copies of chunk bases, so no dangling references.
+    struct ChunkTask { const std::string* name; const std::string* seq; int chunkStart; int chunkStop; };
     std::vector<ChunkTask> tasks;
     for (const auto& contig : contigs) {
         const std::string& name = contig.first;
@@ -1343,7 +1353,7 @@ void GenomeFile::processRegions(std::vector<BamFile*>& bamFiles) {
         std::cout << "Processing " << name << " (" << length << " bp)" << std::endl;
         for (int chunkStart = 0; chunkStart < length; chunkStart += Pilon::chunkSize) {
             int chunkStop = std::min(chunkStart + Pilon::chunkSize, length);
-            tasks.push_back({name, seq, chunkStart, chunkStop});
+            tasks.push_back({&name, &seq, chunkStart, chunkStop});
         }
     }
     int totalChunks = static_cast<int>(tasks.size());
@@ -1366,7 +1376,7 @@ void GenomeFile::processRegions(std::vector<BamFile*>& bamFiles) {
                 taskQueue.pop();
             }
             const auto& task = tasks[taskIdx];
-            processChunk(task.name, task.seq, task.chunkStart, task.chunkStop,
+            processChunk(*task.name, *task.seq, task.chunkStart, task.chunkStop,
                         bamFiles, processedRegions_, resultsMutex,
                         completedChunks, totalChunks);
         }

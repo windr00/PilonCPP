@@ -13,6 +13,7 @@
 - 📊 **Full Feature Parity**: SNP/Indel detection, gap filling, local reassembly (fixLocal), circular contig closure (fixCircles), novel contig assembly (fixNovel), Tracks output, GC/copyNumber analysis, VCF output — fully aligned with the original Scala Pilon.
 - ✅ **Verified Consistent**: On a medium-complexity test set (*Mycoplasma genitalium* G37, 580kb) the output is **byte-for-byte identical** to the original Scala Pilon (580076/580076 bp).
 - ⚡ **v1.2.0 Performance**: 5 output-fidelity-preserving optimization rounds (kmer integer encoding, pileup buffer reuse, native CIGAR, O(1) homopolymer queries, parallel scan I/O). Full Neurospora 40Mb @ 20x run **2m55s → 1m44s** (~40% faster), FASTA byte-identical to Scala.
+- 🧠 **Multi-thread memory reduction**: zero-copy task layer (`ChunkTask` pointers) + per-chunk memory released immediately after processing + no GC reference sequence retention. On a real 2.3G genome at 256 threads: **peak memory 700GB → 184GB**, full run **2h → 1h6m** (~45% faster).
 
 ## 🏗️ Architecture
 
@@ -259,6 +260,10 @@ out_cpp.tracks.bed              # Fix position BED track
 | Multi-threading | ❌ | ✅ |
 
 **v1.2.0 measurements (Neurospora 40Mb @ 20x, full pipeline):** 1 thread 107s → 2 threads 55s → 4 threads 34s → 8/16/64 threads ~33s, **~3.3x speedup**, saturating at 4 threads; output byte-identical across all thread counts. Full run ~40% faster than v1.1.1.
+
+**Memory scaling** (measured maxRSS on the same dataset): 1 thread ~2.6GB → 16 threads ~9.5GB. Peak memory scales with the number of concurrent chunks (i.e., threads); v1.2.0 eliminated per-chunk full-contig sequence copies and post-processing GC sequence retention, and each chunk's memory is released as soon as it finishes.
+
+**Real 2.3G genome test** (production data, 256 threads): **peak memory 184GB** (was 700GB+), full run **1h6m** (was 2h) — peak memory down ~73%, runtime cut ~45%. Vs Scala output: 3,155/78,472 contigs (4%) show small diffs; per-position read-consensus validation shows no systematic bias (30 vs 26 sites favor C++/Scala respectively, remainder are low-confidence/zero-coverage), the two versions are biologically equivalent.
 
 > *Performance figures based on test environment (256 threads / 1TB RAM, 2× AMD EPYC 7B13); actual results may vary.*
 
