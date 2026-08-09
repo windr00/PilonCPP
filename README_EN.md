@@ -12,6 +12,7 @@
 - 🛠️ **Modular Design**: Clean header/source separation, easy to extend and integrate.
 - 📊 **Full Feature Parity**: SNP/Indel detection, gap filling, local reassembly (fixLocal), circular contig closure (fixCircles), novel contig assembly (fixNovel), Tracks output, GC/copyNumber analysis, VCF output — fully aligned with the original Scala Pilon.
 - ✅ **Verified Consistent**: On a medium-complexity test set (*Mycoplasma genitalium* G37, 580kb) the output is **byte-for-byte identical** to the original Scala Pilon (580076/580076 bp).
+- ⚡ **v1.2.0 Performance**: 5 output-fidelity-preserving optimization rounds (kmer integer encoding, pileup buffer reuse, native CIGAR, O(1) homopolymer queries, parallel scan I/O). Full Neurospora 40Mb @ 20x run **2m55s → 1m44s** (~40% faster), FASTA byte-identical to Scala.
 
 ## 🏗️ Architecture
 
@@ -107,6 +108,8 @@ The binary will be at `build/piloncpp`.
 | `--tracks` | Output IGV track files (WIG + BED) |
 | `--changes` | Generate changes listing file |
 | `--threads` | Parallel threads (default: 1) |
+| `--scan-threads` | Scan-phase I/O threads (default: auto, max(threads, min(hw/2,16)); parallel BGZF since v1.2.0) |
+| `--cache-mb` | BAM read cache size (MB, default: 256) |
 | `--vcf` | Output VCF file |
 | `--vcfqe` | VCF with QE field (quality-weighted evidence) |
 | `--diploid` | Assume diploid genome |
@@ -255,7 +258,9 @@ out_cpp.tracks.bed              # Fix position BED track
 | Single-thread speed | Baseline | ~1.5x |
 | Multi-threading | ❌ | ✅ |
 
-> *Performance figures based on test environment; actual results may vary.*
+**v1.2.0 measurements (Neurospora 40Mb @ 20x, full pipeline):** 1 thread 107s → 2 threads 55s → 4 threads 34s → 8/16/64 threads ~33s, **~3.3x speedup**, saturating at 4 threads; output byte-identical across all thread counts. Full run ~40% faster than v1.1.1.
+
+> *Performance figures based on test environment (256 threads / 1TB RAM, 2× AMD EPYC 7B13); actual results may vary.*
 
 ## 📝 License
 

@@ -247,7 +247,13 @@ struct GenomeRegion {
         fragCoverage_arr.clear();
         weightedQual_arr.clear();
         weightedMq_arr.clear();
+        homoRunLen_.clear();
     }
+
+private:
+    // Lazily-precomputed homo-run lengths (homoRun len at each position of
+    // contigBases); computed on first homoRun() call, matching the linear scans.
+    mutable std::vector<int> homoRunLen_;
 };
 
 // FASTA genome file reader

@@ -187,15 +187,11 @@ static BamRead bamToRead(const bam1_t* bam, const bam_hdr_t* hdr) {
     }
     read.mateAlignmentStart = bam->core.mpos;
 
-    // Parse CIGAR string
+    // Store raw CIGAR ops (htslib uint32 encoding: len<<4 | op); avoid string
+    // construction and later re-parsing (scaffold consumes these directly).
     uint32_t ncigar = bam->core.n_cigar;
-    const uint32_t* cigar = bam_get_cigar(bam);
-    std::string cigarStr;
-    for (uint32_t i = 0; i < ncigar; i++) {
-        cigarStr += std::to_string(bam_cigar_oplen(cigar[i]));
-        cigarStr += static_cast<char>(bam_cigar_opchr(bam_cigar_op(cigar[i])));
-    }
-    read.cigar = cigarStr;
+    const uint32_t* cigarOps = bam_get_cigar(bam);
+    read.cigar.assign(cigarOps, cigarOps + ncigar);
 
     return read;
 }
@@ -231,16 +227,6 @@ static std::vector<BamRead> queryRegion(const htsFile* fp, const bam_hdr_t* hdr,
     hts_itr_destroy(iter);
     bam_destroy1(bam);
     return reads;
-}
-
-// Helper: get homo run length at position
-static int homoRun(const std::string& refBases, int i0) {
-    if (i0 < 0 || i0 >= static_cast<int>(refBases.size())) return 0;
-    char baseAtLoc = refBases[i0];
-    for (int i = i0 + 1; i < static_cast<int>(refBases.size()); i++) {
-        if (refBases[i] != baseAtLoc) return i - i0;
-    }
-    return static_cast<int>(refBases.size()) - i0;
 }
 
 // Helper: add a base to pileup (matching Scala PileUpRegion.add)
@@ -328,10 +314,13 @@ static int addReadToPileup(GenomeRegion& region, const bam1_t* bam, int longRead
             }
         }
     }
-    // We create a mutable quality array so we can fix missing quals
-    std::vector<uint8_t> qualsVec(quals, quals + length);
+    // Reusable scratch buffers (thread-safe across worker threads via thread_local)
+    static thread_local std::vector<uint8_t> qualsVec;
+    qualsVec.resize(length);
     if (noQuals) {
         std::fill(qualsVec.begin(), qualsVec.end(), Pilon::defaultQual);
+    } else {
+        std::copy(quals, quals + length, qualsVec.begin());
     }
     
     // Trusted flank
@@ -355,14 +344,15 @@ static int addReadToPileup(GenomeRegion& region, const bam1_t* bam, int longRead
     int indelMq = longReadType > 0 ? std::min(adjMq, 8) : adjMq;
     
     // Decode bases to chars (htslib stores bases as 4-bit interleaved pairs)
-    std::vector<char> baseChars(length);
-    for (int i = 0; i < length; i++) {
-        int base = bam_seqi(bam_get_seq(bam), i);
-        if (base == 1) baseChars[i] = 'A';
-        else if (base == 2) baseChars[i] = 'C';
-        else if (base == 4) baseChars[i] = 'G';
-        else if (base == 8) baseChars[i] = 'T';
-        else baseChars[i] = 'N';
+    // Lookup table indexed by bam_seqi code: 1=A, 2=C, 4=G, 8=T, otherwise N
+    static const char baseTable[16] = {'N','A','C','N','G','N','N','N','T','N','N','N','N','N','N','N'};
+    static thread_local std::vector<char> baseChars;
+    baseChars.resize(length);
+    {
+        const uint8_t* seq = bam_get_seq(bam);
+        for (int i = 0; i < length; i++) {
+            baseChars[i] = baseTable[bam_seqi(seq, i) & 15];
+        }
     }
     
     // Parse CIGAR and add to pileups
@@ -397,7 +387,7 @@ static int addReadToPileup(GenomeRegion& region, const bam1_t* bam, int longRead
                     }
                     
                     // Skip if in homopolymer run (for long reads)
-                    if (!(longReadType > 0 && homoRun(region.contigBases, iloc - region.start) >= 4)) {
+                    if (!(longReadType > 0 && region.homoRun(iloc - region.start) >= 4)) {
                         int idx = region.index(iloc);
                         if (idx >= 0 && idx < region.size()) {
                             uint8_t qual = qualsVec[readOffset];
@@ -437,7 +427,7 @@ static int addReadToPileup(GenomeRegion& region, const bam1_t* bam, int longRead
                     
                     // Skip if in homopolymer run (for long reads)
                     // Scala: also check nanoporeExclude for nanopore reads
-                    bool skipDeletion = (longReadType > 0 && homoRun(region.contigBases, dloc - region.start) >= 4);
+                    bool skipDeletion = (longReadType > 0 && region.homoRun(dloc - region.start) >= 4);
                     if (!skipDeletion && longReadType == BamFile::nanoporeLongRead) {
                         skipDeletion = region.nanoporeExclude(dloc - region.start);
                     }

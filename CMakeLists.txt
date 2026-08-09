@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.14)
-project(piloncpp VERSION 1.1.1 LANGUAGES CXX C)
+project(piloncpp VERSION 1.2.0 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -9,11 +9,19 @@ include(ExternalProject)
 
 set(HTSLIB_SRC ${CMAKE_BINARY_DIR}/htslib_src)
 
+# htslib's autoconf defaults to CFLAGS="-g -Wall -O2"; override to drop -g so
+# debug info from the static lib does not leak into the final binary.
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    set(HTSLIB_CFLAGS "-O2 -DNDEBUG")
+else()
+    set(HTSLIB_CFLAGS "-g -O2")
+endif()
+
 ExternalProject_Add(htslib_ep
     URL https://github.com/samtools/htslib/releases/download/1.19/htslib-1.19.tar.bz2
     SOURCE_DIR ${HTSLIB_SRC}
     BUILD_IN_SOURCE ON
-    CONFIGURE_COMMAND ${HTSLIB_SRC}/configure --disable-libcurl --disable-plugins --without-libdeflate --disable-bz2 --disable-lzma
+    CONFIGURE_COMMAND env CFLAGS=${HTSLIB_CFLAGS} ${HTSLIB_SRC}/configure --disable-libcurl --disable-plugins --without-libdeflate --disable-bz2 --disable-lzma
     BUILD_COMMAND make -C ${HTSLIB_SRC} lib-static
     INSTALL_COMMAND ""
     BUILD_BYPRODUCTS ${HTSLIB_SRC}/libhts.a

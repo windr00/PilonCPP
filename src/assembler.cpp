@@ -28,6 +28,62 @@ namespace pilon {
 
 int Assembler::K = 47;
 
+namespace {
+
+inline int baseCode(char c) {
+    switch (c) {
+        case 'A': return 0;
+        case 'C': return 1;
+        case 'G': return 2;
+        case 'T': return 3;
+        default:  return 0; // N and others -> inert (real ACGT only reaches minDepth)
+    }
+}
+
+// Mask for the hi word given K (2*K-64 bits; 30 bits for K=47).
+inline uint64_t hiMask() {
+    int hb = 2 * Assembler::K - 64;
+    return hb > 0 ? ((1ULL << hb) - 1) : 0;
+}
+
+// Shift the 128-bit packed value left by 2 (drop most-significant base), then
+// OR the next base's 2-bit code into the least-significant position.
+inline void push2(uint64_t& hi, uint64_t& lo, unsigned code) {
+    hi = (hi << 2) | (lo >> 62);
+    lo = (lo << 2) | (code & 3);
+    hi &= hiMask();
+}
+
+inline bool isAcgt(const std::string& s) {
+    for (char c : s) {
+        if (c != 'A' && c != 'C' && c != 'G' && c != 'T') return false;
+    }
+    return true;
+}
+
+// Build a Kmer from the exact K-length string s.
+inline Kmer makeKmer(const std::string& s) {
+    if (!isAcgt(s)) return Kmer{0, 0, true, s};
+    uint64_t hi = 0, lo = 0;
+    for (char c : s) push2(hi, lo, static_cast<unsigned>(baseCode(c)));
+    return Kmer{hi, lo, false, ""};
+}
+
+// Decode a Kmer back to its K-length string.
+inline std::string kmerToStr(const Kmer& k) {
+    if (k.hasN) return k.s;
+    std::string s(Assembler::K, 'N');
+    uint64_t hi = k.hi, lo = k.lo;
+    for (int i = Assembler::K - 1; i >= 0; i--) {
+        s[i] = "ACGT"[lo & 3];
+        lo = (lo >> 2) | ((hi & 3) << 62);
+        hi >>= 2;
+    }
+    return s;
+}
+
+} // namespace
+
 Assembler::Assembler(int minDepth_)
     : minDepth_(minDepth_), nReads_(0), nBases_(0), loopLength_(0) {}
 
@@ -74,12 +130,27 @@ void Assembler::addRead(const BamRead& r) {
 
 void Assembler::addToPileups(const std::string& bases, const std::vector<uint8_t>& quals, int mq) {
     int length = static_cast<int>(bases.length());
-    for (int offset = 0; offset <= length - K - 1; offset++) {
-        std::string kmer = bases.substr(offset, K);
-        if (pileups.find(kmer) == pileups.end()) {
-            pileups[kmer] = PileUp();
+    int maxOff = length - K - 1;
+    if (maxOff < 0) return;
+    if (isAcgt(bases)) {
+        // Fast path: rolling 94-bit integer encoding, no per-kmer allocation.
+        uint64_t hi = 0, lo = 0;
+        for (int i = 0; i < K; i++) push2(hi, lo, static_cast<unsigned>(baseCode(bases[i])));
+        for (int offset = 0; offset <= maxOff; offset++) {
+            if (offset > 0) push2(hi, lo, static_cast<unsigned>(baseCode(bases[offset + K - 1])));
+            Kmer kmer{hi, lo, false, ""};
+            auto it = pileups.find(kmer);
+            if (it == pileups.end()) it = pileups.emplace(kmer, PileUp()).first;
+            it->second.add(bases[offset + K], quals[offset + K], mq);
         }
-        pileups[kmer].add(bases[offset + K], quals[offset + K], mq);
+    } else {
+        // Rare path: read contains N (or other non-ACGT) — literal string kmers.
+        for (int offset = 0; offset <= maxOff; offset++) {
+            Kmer kmer = makeKmer(bases.substr(offset, K));
+            auto it = pileups.find(kmer);
+            if (it == pileups.end()) it = pileups.emplace(kmer, PileUp()).first;
+            it->second.add(bases[offset + K], quals[offset + K], mq);
+        }
     }
 }
 
@@ -105,15 +176,35 @@ void Assembler::addGraphSeqs(const std::vector<std::string>& seqs) {
 
 void Assembler::graphSeq(const std::string& bases) {
     int length = static_cast<int>(bases.length());
-    for (int offset = 0; offset <= length - K - 1; offset++) {
-        std::string k = bases.substr(offset, K);
-        std::string nextK = k.substr(1) + bases[offset + K];
-
-        auto it = kGraph.find(k);
-        if (it != kGraph.end() && it->second != nextK) {
-            addLink(altGraph, k, nextK, 1);
-        } else {
-            addLink(kGraph, k, nextK, 1);
+    int maxOff = length - K - 1;
+    if (maxOff < 0) return;
+    if (isAcgt(bases)) {
+        uint64_t hi = 0, lo = 0;
+        for (int i = 0; i < K; i++) push2(hi, lo, static_cast<unsigned>(baseCode(bases[i])));
+        for (int offset = 0; offset <= maxOff; offset++) {
+            Kmer k{hi, lo, false, ""};
+            // nextK = bases[offset+1..offset+K]: drop first base of k, append bases[offset+K]
+            uint64_t nhi = hi, nlo = lo;
+            push2(nhi, nlo, static_cast<unsigned>(baseCode(bases[offset + K])));
+            Kmer nextK{nhi, nlo, false, ""};
+            auto it = kGraph.find(k);
+            if (it != kGraph.end() && it->second != nextK) {
+                addLink(altGraph, k, nextK, 1);
+            } else {
+                addLink(kGraph, k, nextK, 1);
+            }
+            if (offset < maxOff) push2(hi, lo, static_cast<unsigned>(baseCode(bases[offset + K])));
+        }
+    } else {
+        for (int offset = 0; offset <= maxOff; offset++) {
+            Kmer k = makeKmer(bases.substr(offset, K));
+            Kmer nextK = makeKmer(bases.substr(offset + 1, K));
+            auto it = kGraph.find(k);
+            if (it != kGraph.end() && it->second != nextK) {
+                addLink(altGraph, k, nextK, 1);
+            } else {
+                addLink(kGraph, k, nextK, 1);
+            }
         }
     }
 }
@@ -128,13 +219,15 @@ void Assembler::buildGraph() {
     }
 
     for (auto& kv : pileups) {
-        const std::string& k = kv.first;
+        const Kmer& k = kv.first;
         PileUp& pu = kv.second;
         
         if (pu.depth() >= minDepth_) {
             auto bc = pu.baseCall();
-            std::string prefix = k.substr(1);
-            std::string nextK = prefix + bc.base;
+            // prefix = k[1:], nextK = prefix + bc.base (integer rolling)
+            uint64_t nhi = k.hi, nlo = k.lo;
+            push2(nhi, nlo, static_cast<unsigned>(baseCode(bc.base)));
+            Kmer nextK{nhi, nlo, false, ""};
             int weight = static_cast<int>(pu.baseCount.sums[bc.baseIndex]);
             
             auto it = kGraph.find(k);
@@ -145,7 +238,9 @@ void Assembler::buildGraph() {
             }
             
             if (!bc.homo) {
-                addLink(altGraph, k, prefix + bc.altBase, 
+                uint64_t ahi = k.hi, alo = k.lo;
+                push2(ahi, alo, static_cast<unsigned>(baseCode(bc.altBase)));
+                addLink(altGraph, k, Kmer{ahi, alo, false, ""}, 
                        static_cast<int>(pu.baseCount.sums[bc.altBaseIndex]));
             }
         }
@@ -179,17 +274,18 @@ void Assembler::prunePileups(int minCount) {
     }
 }
 
-std::string Assembler::kmerPathString(const std::vector<std::string>& kmers, bool prependLength) {
+std::string Assembler::kmerPathString(const std::vector<Kmer>& kmers, bool prependLength) {
     if (kmers.empty()) return "";
 
     // Scala: val path = kmers.reverse
     // kmerPathsForward builds kmers newest-first; reverse to get correct base order
-    std::vector<std::string> reversed = kmers;
+    std::vector<Kmer> reversed = kmers;
     std::reverse(reversed.begin(), reversed.end());
 
-    std::string pathStr = reversed.front();
+    std::string pathStr = kmerToStr(reversed.front());
     for (size_t i = 1; i < reversed.size(); i++) {
-        pathStr += reversed[i].back();
+        if (reversed[i].hasN) pathStr += reversed[i].s.back();
+        else pathStr += "ACGT"[reversed[i].lo & 3];
     }
 
     if (prependLength) {
@@ -198,11 +294,11 @@ std::string Assembler::kmerPathString(const std::vector<std::string>& kmers, boo
     return pathStr;
 }
 
-void Assembler::noteKmerLoop(int loopIndex, const std::vector<std::string>& kmers) {
+void Assembler::noteKmerLoop(int loopIndex, const std::vector<Kmer>& kmers) {
     int length = loopIndex + 1;
     if (loopLength_ == 0 || length < loopLength_) {
         loopLength_ = length;
-        std::vector<std::string> subset(kmers.begin(), kmers.begin() + loopIndex + 1);
+        std::vector<Kmer> subset(kmers.begin(), kmers.begin() + loopIndex + 1);
         loopSequence_ = kmerPathString(subset).substr(0, length);
         
         if (Pilon::verbose) {
@@ -211,10 +307,10 @@ void Assembler::noteKmerLoop(int loopIndex, const std::vector<std::string>& kmer
     }
 }
 
-std::vector<std::vector<std::string>>
-Assembler::kmerPathsForward(std::vector<std::string> kmersIn, int branches) {
+std::vector<std::vector<Kmer>>
+Assembler::kmerPathsForward(std::vector<Kmer> kmersIn, int branches) {
     while (true) {
-        const std::string& kmer = kmersIn.front();
+        const Kmer& kmer = kmersIn.front();
         
         auto it = kGraph.find(kmer);
         if (it == kGraph.end()) {
@@ -223,8 +319,8 @@ Assembler::kmerPathsForward(std::vector<std::string> kmersIn, int branches) {
         
         auto altIt = altGraph.find(kmer);
         if (altIt != altGraph.end()) {
-            std::string next1 = it->second;
-            std::string next2 = altIt->second;
+            Kmer next1 = it->second;
+            Kmer next2 = altIt->second;
             
             bool seen1 = std::find(kmersIn.begin() + 1, kmersIn.end(), next1) != kmersIn.end();
             bool seen2 = std::find(kmersIn.begin() + 1, kmersIn.end(), next2) != kmersIn.end();
@@ -245,10 +341,10 @@ Assembler::kmerPathsForward(std::vector<std::string> kmersIn, int branches) {
             else if (seen2 && !seen1) kmersIn.insert(kmersIn.begin(), next1);
             else {
                 if (branches < maxBranches) {
-                    std::vector<std::string> path1 = {next1};
+                    std::vector<Kmer> path1 = {next1};
                     path1.insert(path1.end(), kmersIn.begin(), kmersIn.end());
                     auto paths1 = kmerPathsForward(path1, branches + 1);
-                    std::vector<std::string> path2 = {next2};
+                    std::vector<Kmer> path2 = {next2};
                     path2.insert(path2.end(), kmersIn.begin(), kmersIn.end());
                     auto paths2 = kmerPathsForward(path2, branches + 1);
                     paths1.insert(paths1.end(), paths2.begin(), paths2.end());
@@ -257,7 +353,7 @@ Assembler::kmerPathsForward(std::vector<std::string> kmersIn, int branches) {
                 return {kmersIn};
             }
         } else {
-            std::string next = it->second;
+            Kmer next = it->second;
             auto pos = std::find(kmersIn.begin(), kmersIn.end(), next);
             if (pos != kmersIn.end()) {
                 noteKmerLoop(static_cast<int>(pos - kmersIn.begin()), kmersIn);
@@ -284,7 +380,7 @@ std::vector<std::string> Assembler::pathsForward(const std::string& startingKmer
         std::cout << "pathsForward: " << startingKmer << std::flush;
     }
     
-    auto kmerPaths = kmerPathsForward({startingKmer});
+    auto kmerPaths = kmerPathsForward({makeKmer(startingKmer)});
     std::vector<std::string> paths;
     for (const auto& kp : kmerPaths) {
         paths.push_back(kmerPathString(kp));
@@ -367,7 +463,7 @@ std::vector<std::string> Assembler::novel(Assembler& ref) {
     auto novelKmers = [&](const std::string& seq) -> int {
         int count = 0;
         for (size_t i = 0; i + K <= seq.length(); i++) {
-            std::string kmer = seq.substr(i, K);
+            Kmer kmer = makeKmer(seq.substr(i, K));
             if (ref.kGraph.find(kmer) == ref.kGraph.end()) {
                 count++;
             }
@@ -382,7 +478,7 @@ std::vector<std::string> Assembler::novel(Assembler& ref) {
     prunePileups();
     // Save k-mer list before building graph (buildGraph clears pileups)
     std::vector<std::string> kmers;
-    for (const auto& kv : pileups) kmers.push_back(kv.first);
+    for (const auto& kv : pileups) kmers.push_back(kmerToStr(kv.first));
     if (kGraph.empty()) buildGraph();
 
     std::unordered_set<std::string> usedKmers;

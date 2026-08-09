@@ -28,6 +28,42 @@
 
 namespace pilon {
 
+// Packed k-mer representation for the assembler.
+//
+// Most reads/sequences are pure ACGT, encoded as 2 bits per base in a 94-bit
+// integer (K=47). The rare k-mers containing N (or any non-ACGT base) fall back
+// to their literal string and are tagged with hasN so they remain distinct keys,
+// exactly matching the Scala string-keyed behavior. Non-ACGT kmers never reach
+// minDepth and never enter the graph, so the fallback is essentially inert.
+struct Kmer {
+    uint64_t hi = 0;   // bits 64..(2*K-1)
+    uint64_t lo = 0;   // bits 0..63
+    bool hasN = false; // true => this k-mer is represented by `s`
+    std::string s;     // used only when hasN is set
+
+    bool operator==(const Kmer& o) const {
+        if (hasN != o.hasN) return false;
+        if (hasN) return s == o.s;
+        return hi == o.hi && lo == o.lo;
+    }
+    bool operator!=(const Kmer& o) const { return !(*this == o); }
+};
+
+} // namespace pilon
+
+namespace std {
+template<> struct hash<pilon::Kmer> {
+    size_t operator()(const pilon::Kmer& k) const noexcept {
+        if (k.hasN) return std::hash<std::string>()(k.s);
+        uint64_t x = k.hi ^ (k.lo + 0x9e3779b97f4a7c15ULL + (k.hi << 6) + (k.hi >> 2));
+        x ^= x >> 30; x *= 0xbf58476d1ce4e5b9ULL; x ^= x >> 27; x *= 0x94d049bb133111ebULL; x ^= x >> 31;
+        return static_cast<size_t>(x);
+    }
+};
+}
+
+namespace pilon {
+
 struct BamRead {
     std::string readName;
     std::string bases;
@@ -48,7 +84,7 @@ struct BamRead {
     std::string mateReferenceName;
     int mateAlignmentStart;
     int inferredInsertSize;
-    std::string cigar;
+    std::vector<uint32_t> cigar;  // raw htslib CIGAR ops (len<<4 | op), avoids re-parsing
 };
 
 class Assembler {
@@ -60,7 +96,6 @@ public:
     static constexpr int minNovel = 200;
     static constexpr int minNovelPct = 50;
 
-    using Kmer = std::string;
     using KmerPileup = std::unordered_map<Kmer, PileUp>;
     using KmerGraph = std::unordered_map<Kmer, Kmer>;
 
@@ -110,11 +145,11 @@ private:
     void graphSeq(const std::string& bases);
     static void addLink(KmerGraph& g, const Kmer& k1, const Kmer& k2, int weight);
 
-    std::string kmerPathString(const std::vector<std::string>& kmers, bool prependLength = false);
-    void noteKmerLoop(int loopIndex, const std::vector<std::string>& kmers);
+    std::string kmerPathString(const std::vector<Kmer>& kmers, bool prependLength = false);
+    void noteKmerLoop(int loopIndex, const std::vector<Kmer>& kmers);
 
-    std::vector<std::vector<std::string>>
-    kmerPathsForward(std::vector<std::string> kmersIn, int branches = 0);
+    std::vector<std::vector<Kmer>>
+    kmerPathsForward(std::vector<Kmer> kmersIn, int branches = 0);
 };
 
 } // namespace pilon

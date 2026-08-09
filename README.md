@@ -12,6 +12,7 @@
 - 🛠️ **模块化设计**：清晰的头文件与源文件分离，易于扩展和集成。
 - 📊 **完整功能**：支持 SNP/Indel 检测、Gap 填充、局部重装（fixLocal）、环形 contig 闭合（fixCircles）、新序列组装（fixNovel）、Tracks 输出、GC/copyNumber 分析、VCF 输出等，与原版 Scala Pilon 功能完全对齐。
 - ✅ **已验证一致**：回归测试（生殖支原体 G37，580kb）**完全一致**；大型基因组（2.36 Gbp）仅 3,721/78,472 contigs 因 break fix 平局差异，SNP/Indel calling 逐位验证通过。（2026-07-04 重新验证通过）
+- ⚡ **v1.2.0 性能优化**：5 轮输出保真优化（kmer 整数编码、pileup 缓冲复用、原生 CIGAR、O(1) 同聚物查询、scan I/O 并行），Neurospora 40Mb @ 20x 全流程 **2m55s → 1m44s**（~40% 加速），FASTA 输出与 Scala **逐字节一致**
 
 ## 🏗️ 架构
 
@@ -115,7 +116,7 @@ make -j$(nproc)
 | `--min-qual` | 最小碱基质量 (默认: 0) |
 | `--defaultqual` | BAM 无质量值时使用的默认碱基质量 |
 | `--iupac` | 输出 IUPAC 模糊碱基编码 |
-| `--scan-threads` | BAM 扫描阶段 IO 线程数 (默认: 同 `--threads`) |
+| `--scan-threads` | BAM 扫描阶段 IO 线程数 (默认: 自动, max(threads, min(核数/2,16))，v1.2.0 起默认启用 BGZF 并行解压) |
 | `--cache-mb` | BAM 扫描读缓存大小 (MB, 默认: 256) |
 | `--verbose, --debug` | 详细/调试输出 |
 | `--version` | 显示版本号 |
@@ -264,7 +265,9 @@ out_cpp.tracks.bed              # 修复位置 BED 标注
 | 单线程速度 | 基准 | ~1.5x |
 | 多线程支持 | ❌ | ✅ |
 
-> *注：性能数据基于测试环境，实际表现可能因硬件和数据集而异。*
+**v1.2.0 实测（Neurospora 40Mb @ 20x 全流程）**：1 线程 107s → 2 线程 55s → 4 线程 34s → 8/16/64 线程 ~33s，**加速比约 3.3x**，4 线程即接近饱和；输出全部与 1 线程逐字节一致。各阶段优化后全流程较 v1.1.1 提速 ~40%。
+
+> *注：性能数据基于测试环境（256 线程 / 1TB RAM，2× AMD EPYC 7B13），实际表现可能因硬件和数据集而异。*
 
 ## 📝 许可证
 

@@ -145,22 +145,15 @@ EndAlignment::EndAlignment(const BamRead& read, const std::string& cName, int cL
     // Compute unclipped coordinates from CIGAR soft clips
     int us = read.alignmentStart;
     int ue = read.alignmentEnd;
-    const std::string& cig = read.cigar;
+    const std::vector<uint32_t>& cig = read.cigar;
     if (!cig.empty()) {
-        // Parse first CIGAR op for left soft clip
-        size_t pos = 0;
-        int opLen = 0;
-        while (pos < cig.size() && std::isdigit(cig[pos])) { opLen = opLen * 10 + (cig[pos] - '0'); pos++; }
-        if (pos < cig.size() && cig[pos] == 'S') us -= opLen;
-        // Parse last CIGAR op for right soft clip
-        size_t end = cig.size();
-        while (end > 0 && !std::isdigit(cig[end-1])) end--;  // skip op char
-        size_t numStart = end;
-        while (numStart > 0 && std::isdigit(cig[numStart-1])) numStart--;
-        if (numStart < end) {
-            std::string numStr = cig.substr(numStart, end - numStart);
-            int lastLen = std::stoi(numStr);
-            if (end < cig.size() && cig[end] == 'S') ue += lastLen;
+        // First CIGAR op: left soft clip
+        if (bam_cigar_op(cig.front()) == BAM_CSOFT_CLIP) {
+            us -= static_cast<int>(bam_cigar_oplen(cig.front()));
+        }
+        // Last CIGAR op: right soft clip
+        if (bam_cigar_op(cig.back()) == BAM_CSOFT_CLIP) {
+            ue += static_cast<int>(bam_cigar_oplen(cig.back()));
         }
     }
     unclippedStart = us;

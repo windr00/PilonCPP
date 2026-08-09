@@ -27,6 +27,7 @@
 #include <iostream>
 #include <fstream>
 #include <algorithm>
+#include <thread>
 
 using namespace pilon;
 
@@ -48,9 +49,17 @@ int main(int argc, char* argv[]) {
 
     GenomeFile genome(Pilon::genomePath, Pilon::targets);
 
-    // Open BAM files with I/O threads for scan phase
-    int scanThreads = Pilon::scanThreads > 0 ? Pilon::scanThreads : Pilon::threads;
-    if (scanThreads < 1) scanThreads = 1;
+    // Open BAM files with I/O threads for scan phase.
+    // Scan is dominated by BGZF decompression; use a decent default thread
+    // count (bounded by hardware) so it runs parallel even with --threads 1.
+    int scanThreads = Pilon::scanThreads;
+    if (scanThreads < 1) {
+        int hw = static_cast<int>(std::thread::hardware_concurrency());
+        int bound = std::max(4, std::min(hw / 2, 16));
+        int userThreads = std::max(Pilon::threads, 1);
+        scanThreads = std::max(userThreads, bound);
+        std::cout << "Defaulting to " << scanThreads << " scan I/O threads (use --scan-threads to override)" << std::endl;
+    }
     for (auto* bam : Pilon::bamFiles) {
         if (!bam->open(scanThreads)) {
             std::cerr << "Failed to open BAM: " << bam->path() << std::endl;

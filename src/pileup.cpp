@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <unordered_map>
 #include <sstream>
+#include <array>
 
 namespace pilon {
 
@@ -34,13 +35,13 @@ long long PileUp::count() const { return baseCount.sum(); }
 long long PileUp::depth() const { return baseCount.sum() + deletions; }
 
 int PileUp::baseIndex(char c) const {
-    switch (c) {
-        case 'A': return 0;
-        case 'C': return 1;
-        case 'G': return 2;
-        case 'T': return 3;
-        default: return -1;
-    }
+    static const std::array<int, 256> table = []() {
+        std::array<int, 256> t;
+        t.fill(-1);
+        t['A'] = 0; t['C'] = 1; t['G'] = 2; t['T'] = 3;
+        return t;
+    }();
+    return table[static_cast<unsigned char>(c)];
 }
 
 char PileUp::indexBase(int i) const {

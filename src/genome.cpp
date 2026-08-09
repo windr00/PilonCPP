@@ -188,11 +188,15 @@ int GenomeRegion::index(int locus) const {
 // =============================================================================
 int GenomeRegion::homoRun(int loc) const {
     if (loc < 0 || loc >= static_cast<int>(contigBases.size())) return 0;
-    char baseAtLoc = contigBases[loc];
-    for (int i = loc + 1; i < static_cast<int>(contigBases.size()); i++) {
-        if (contigBases[i] != baseAtLoc) return i - loc;
+    // One-pass precompute of run length at every position (reverse scan).
+    if (homoRunLen_.empty()) {
+        int n = static_cast<int>(contigBases.size());
+        homoRunLen_.assign(n, 1);
+        for (int i = n - 2; i >= 0; i--) {
+            homoRunLen_[i] = (contigBases[i] == contigBases[i + 1]) ? homoRunLen_[i + 1] + 1 : 1;
+        }
     }
-    return static_cast<int>(contigBases.size()) - loc;
+    return homoRunLen_[loc];
 }
 bool GenomeRegion::nanoporeExclude(int idx) const {
     return (idx - 2 >= 0 && idx + 2 < static_cast<int>(contigBases.size()) &&
