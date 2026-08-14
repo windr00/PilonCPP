@@ -47,6 +47,26 @@ piloncpp/
 
 ## 🛠️ 构建与安装
 
+### 下载预编译二进制（推荐）
+
+从 [GitHub Releases](https://github.com/windr00/PilonCPP/releases) 页面下载最新版本，解压后即可直接运行，无需安装依赖或编译：
+
+```bash
+# 下载 v1.2.1 预编译包
+wget https://github.com/windr00/PilonCPP/releases/download/v1.2.1/piloncpp-v1.2.1-linux-x86_64.tar.gz
+
+# 解压（得到 piloncpp-manylinux_x86_64 可执行文件 + RELEASE.md）
+tar xzf piloncpp-v1.2.1-linux-x86_64.tar.gz
+
+# 验证版本
+./piloncpp-manylinux_x86_64 --version
+
+# （可选）重命名为 piloncpp，方便按本文档后续示例调用
+mv piloncpp-manylinux_x86_64 piloncpp
+```
+
+> 预编译二进制为静态链接，兼容 glibc ≥ 2.25（Ubuntu 18.04+ / CentOS 8+ / RHEL 8+）。
+
 ### 依赖
 - C++17 编译器 (GCC 7+ / Clang 5+)
 - CMake 3.14+

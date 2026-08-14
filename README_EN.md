@@ -47,6 +47,26 @@ piloncpp/
 
 ## 🛠️ Build & Install
 
+### Pre-built Binary (Recommended)
+
+Download the latest release from the [GitHub Releases](https://github.com/windr00/PilonCPP/releases) page — extract and run directly, no dependencies or compilation required:
+
+```bash
+# Download the v1.2.1 pre-built package
+wget https://github.com/windr00/PilonCPP/releases/download/v1.2.1/piloncpp-v1.2.1-linux-x86_64.tar.gz
+
+# Extract (yields the piloncpp-manylinux_x86_64 executable + RELEASE.md)
+tar xzf piloncpp-v1.2.1-linux-x86_64.tar.gz
+
+# Verify version
+./piloncpp-manylinux_x86_64 --version
+
+# (Optional) rename to piloncpp for convenience with the examples below
+mv piloncpp-manylinux_x86_64 piloncpp
+```
+
+> The pre-built binary is statically linked, compatible with glibc ≥ 2.25 (Ubuntu 18.04+ / CentOS 8+ / RHEL 8+).
+
 ### Dependencies
 - C++17 compiler (GCC 7+ / Clang 5+)
 - CMake 3.14+
